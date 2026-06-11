@@ -14,7 +14,8 @@ import type {
   LeaveRequest, LeaveType, SwapRequest, ApprovalRecord,
   AttendanceSummary, BlacklistRule, TicketStatus,
   ApprovalStatus, MonthAuditDetail, BonusImpactItem,
-  ManualAdjustment, HandoffRecord
+  ManualAdjustment, HandoffRecord, AdjustmentType,
+  ApprovalBoardStat, SettlementPreview
 } from '@/types';
 
 function loadFromStorage<T>(key: string, fallback: T): T {
@@ -59,6 +60,8 @@ function calcWorkDays(year: number, month: number): number {
   return workDays;
 }
 
+const OVERDUE_HOURS = 24;
+
 interface BusinessState {
   currentStoreId: string;
   currentRole: UserRole;
@@ -81,10 +84,11 @@ interface BusinessState {
   addLeaveRequest: (data: { employeeId: string; storeId: string; leaveType: LeaveType; startDate: string; endDate: string; days: number; reason: string }) => void;
   addSwapRequest: (data: { applicantId: string; targetId: string; storeId: string; applicantDate: string; targetDate: string; applicantShift: ShiftType; targetShift: ShiftType; reason: string }) => void;
 
-  approveRequest: (sourceId: string, sourceType: 'leave' | 'swap' | 'exception', approverRole: 'store_manager' | 'hr' | 'assistant_manager') => boolean;
-  rejectRequest: (sourceId: string, sourceType: 'leave' | 'swap' | 'exception', approverRole: 'store_manager' | 'hr' | 'assistant_manager', comment?: string) => boolean;
-  batchApproveRequests: (sourceIds: string[], sourceType: 'leave' | 'swap' | 'exception', approverRole: 'store_manager' | 'hr' | 'assistant_manager') => number;
-  canApprove: (status: ApprovalStatus, approverRole: 'store_manager' | 'hr' | 'assistant_manager') => boolean;
+  canApprove: (status: ApprovalStatus, approverRole: UserRole, request?: LeaveRequest | SwapRequest) => boolean;
+
+  approveRequest: (sourceId: string, sourceType: 'leave' | 'swap' | 'exception', approverRole: UserRole, approverId?: string, approverName?: string) => boolean;
+  rejectRequest: (sourceId: string, sourceType: 'leave' | 'swap' | 'exception', approverRole: UserRole, approverId?: string, approverName?: string, comment?: string) => boolean;
+  batchApproveRequests: (sourceIds: string[], sourceType: 'leave' | 'swap' | 'exception', approverRole: UserRole) => number;
 
   urgeRequest: (sourceId: string, sourceType: 'leave' | 'swap') => boolean;
   handoffRequest: (sourceId: string, sourceType: 'leave' | 'swap', toHandlerId: string, toHandlerName: string, reason: string) => void;
@@ -96,9 +100,14 @@ interface BusinessState {
 
   lockMonth: (storeId: string, year: number, month: number) => void;
   isMonthLocked: (storeId: string, year: number, month: number) => boolean;
+  addManualAdjustment: (summaryId: string, type: AdjustmentType, amount: number, reason: string) => boolean;
   adjustBonus: (summaryId: string, bonus: number, fine: number, reason?: string) => boolean;
   recalculateSummaries: (storeId: string, year: number, month: number) => number;
   getMonthAuditDetail: (storeId: string, year: number, month: number) => MonthAuditDetail[];
+
+  getApprovalBoardStats: () => ApprovalBoardStat[];
+  getSettlementPreview: (storeId: string, year: number, month: number) => SettlementPreview;
+  generateSettlementFiles: (storeId: string, year: number, month: number) => { name: string; content: string }[];
 
   toggleBlacklistRule: (ruleId: string) => void;
 }
@@ -137,19 +146,18 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
     sourceId: string,
     sourceType: 'leave' | 'swap' | 'exception',
     approverRole: 'store_manager' | 'hr' | 'assistant_manager',
+    approverId: string,
+    approverName: string,
     result: ApprovalStatus,
     comment: string,
     approvals: ApprovalRecord[],
     action?: ApprovalRecord['action']
   ) => {
-    const approverName = approverRole === 'store_manager' ? '店长'
-      : approverRole === 'assistant_manager' ? '副店长'
-      : '人事管理员';
     approvals.push({
       id: `approval-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       sourceId,
       sourceType,
-      approverId: approverRole,
+      approverId,
       approverName,
       approverRole,
       result,
@@ -223,6 +231,25 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
     return next;
   };
 
+  const getRoleInfo = (role: UserRole, id?: string, name?: string): { roleId: string; roleName: string; approverRole: 'store_manager' | 'hr' | 'assistant_manager' } => {
+    if (role === 'hr') {
+      return { roleId: id || 'hr', roleName: name || '人事管理员', approverRole: 'hr' };
+    }
+    if (role === 'assistant_manager') {
+      return { roleId: id || 'asm', roleName: name || '副店长', approverRole: 'assistant_manager' };
+    }
+    return { roleId: id || 'store_manager', roleName: name || '店长', approverRole: 'store_manager' };
+  };
+
+  const calcAdjustmentDelta = (type: AdjustmentType, amount: number): { deltaBonus: number; deltaFine: number } => {
+    switch (type) {
+      case 'bonus_add': return { deltaBonus: amount, deltaFine: 0 };
+      case 'bonus_deduct': return { deltaBonus: -amount, deltaFine: 0 };
+      case 'fine_add': return { deltaBonus: 0, deltaFine: amount };
+      case 'fine_reduce': return { deltaBonus: 0, deltaFine: -amount };
+    }
+  };
+
   return {
     currentStoreId: stores[0].id,
     currentRole: 'hr' as UserRole,
@@ -239,7 +266,18 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
     setCurrentStoreId: (id) => set({ currentStoreId: id }),
     setCurrentRole: (role) => set({ currentRole: role }),
 
-    canApprove: (status, approverRole) => {
+    canApprove: (status, approverRole, request) => {
+      if (status === 'approved' || status === 'rejected') return false;
+
+      if (request && request.currentHandlerId) {
+        if (approverRole === 'assistant_manager') {
+          return request.currentHandlerId !== 'store_manager';
+        }
+        if (approverRole === 'store_manager') {
+          return request.currentHandlerId === 'store_manager';
+        }
+      }
+
       if (approverRole === 'hr') {
         return status === 'pending_hr';
       }
@@ -322,6 +360,8 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         status: 'pending_store',
         createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
         reminderCount: 0,
+        currentHandlerId: 'store_manager',
+        currentHandlerName: '店长',
         handoffRecords: [],
       };
       set(state => ({ leaveRequests: [...state.leaveRequests, newLeave] }));
@@ -335,15 +375,19 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         status: 'pending_store',
         createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
         reminderCount: 0,
+        currentHandlerId: 'store_manager',
+        currentHandlerName: '店长',
         handoffRecords: [],
       };
       set(state => ({ swapRequests: [...state.swapRequests, newSwap] }));
       persist();
     },
 
-    approveRequest: (sourceId, sourceType, approverRole) => {
+    approveRequest: (sourceId, sourceType, approverRole, approverId, approverName) => {
       const { canApprove } = get();
+      const roleInfo = getRoleInfo(approverRole, approverId, approverName);
       let success = false;
+
       set(state => {
         let nextLeaves = [...state.leaveRequests];
         let nextSwaps = [...state.swapRequests];
@@ -353,42 +397,64 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
 
         if (sourceType === 'leave') {
           const leave = nextLeaves.find(l => l.id === sourceId);
-          if (!leave) return state;
-          if (!canApprove(leave.status, approverRole)) return state;
+          if (!leave || !canApprove(leave.status, approverRole, leave)) return state;
 
           if (approverRole === 'store_manager' || approverRole === 'assistant_manager') {
             nextLeaves = nextLeaves.map(l =>
-              l.id === sourceId ? { ...l, status: 'pending_hr' as const, managerComment: '店长初审通过' } : l
+              l.id === sourceId ? {
+                ...l,
+                status: 'pending_hr' as const,
+                managerComment: `${roleInfo.roleName}初审通过`,
+                currentHandlerId: 'hr',
+                currentHandlerName: '人事管理员',
+              } : l
             );
-            addApprovalRecord(sourceId, 'leave', approverRole, 'pending_hr', '店长初审通过', nextApprovals, 'approve');
+            addApprovalRecord(sourceId, 'leave', roleInfo.approverRole, roleInfo.roleId, roleInfo.roleName, 'pending_hr', `${roleInfo.roleName}初审通过`, nextApprovals, 'approve');
             success = true;
           }
           if (approverRole === 'hr') {
             nextLeaves = nextLeaves.map(l =>
-              l.id === sourceId ? { ...l, status: 'approved' as const, hrComment: '人事复核通过' } : l
+              l.id === sourceId ? {
+                ...l,
+                status: 'approved' as const,
+                hrComment: '人事复核通过',
+                currentHandlerId: undefined,
+                currentHandlerName: undefined,
+              } : l
             );
-            addApprovalRecord(sourceId, 'leave', 'hr', 'approved', '人事复核通过', nextApprovals, 'approve');
+            addApprovalRecord(sourceId, 'leave', 'hr', 'hr', '人事管理员', 'approved', '人事复核通过', nextApprovals, 'approve');
             success = true;
           }
         }
 
         if (sourceType === 'swap') {
           const swap = nextSwaps.find(s => s.id === sourceId);
-          if (!swap) return state;
-          if (!canApprove(swap.status, approverRole)) return state;
+          if (!swap || !canApprove(swap.status, approverRole, swap)) return state;
 
           if (approverRole === 'store_manager' || approverRole === 'assistant_manager') {
             nextSwaps = nextSwaps.map(s =>
-              s.id === sourceId ? { ...s, status: 'pending_hr' as const, managerComment: '店长初审通过' } : s
+              s.id === sourceId ? {
+                ...s,
+                status: 'pending_hr' as const,
+                managerComment: `${roleInfo.roleName}初审通过`,
+                currentHandlerId: 'hr',
+                currentHandlerName: '人事管理员',
+              } : s
             );
-            addApprovalRecord(sourceId, 'swap', approverRole, 'pending_hr', '店长初审通过', nextApprovals, 'approve');
+            addApprovalRecord(sourceId, 'swap', roleInfo.approverRole, roleInfo.roleId, roleInfo.roleName, 'pending_hr', `${roleInfo.roleName}初审通过`, nextApprovals, 'approve');
             success = true;
           }
           if (approverRole === 'hr') {
             nextSwaps = nextSwaps.map(s =>
-              s.id === sourceId ? { ...s, status: 'approved' as const, hrComment: '人事复核通过' } : s
+              s.id === sourceId ? {
+                ...s,
+                status: 'approved' as const,
+                hrComment: '人事复核通过',
+                currentHandlerId: undefined,
+                currentHandlerName: undefined,
+              } : s
             );
-            addApprovalRecord(sourceId, 'swap', 'hr', 'approved', '人事复核通过', nextApprovals, 'approve');
+            addApprovalRecord(sourceId, 'swap', 'hr', 'hr', '人事管理员', 'approved', '人事复核通过', nextApprovals, 'approve');
             const approvedSwap = nextSwaps.find(s => s.id === sourceId);
             if (approvedSwap) {
               nextSchedules = applySwapToSchedules(approvedSwap, nextSchedules);
@@ -398,11 +464,10 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         }
 
         if (sourceType === 'exception') {
-          const approverName = approverRole === 'hr' ? '人事管理员' : (approverRole === 'assistant_manager' ? '副店长' : '店长');
           nextTickets = nextTickets.map(t =>
-            t.id === sourceId ? { ...t, status: 'resolved' as const, handler: approverName } : t
+            t.id === sourceId ? { ...t, status: 'resolved' as const, handler: roleInfo.roleName } : t
           );
-          addApprovalRecord(sourceId, 'exception', approverRole, 'approved', '异常工单处理通过', nextApprovals, 'approve');
+          addApprovalRecord(sourceId, 'exception', roleInfo.approverRole, roleInfo.roleId, roleInfo.roleName, 'approved', '异常工单处理通过', nextApprovals, 'approve');
           success = true;
         }
 
@@ -418,57 +483,57 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
       return success;
     },
 
-    rejectRequest: (sourceId, sourceType, approverRole, comment) => {
+    rejectRequest: (sourceId, sourceType, approverRole, approverId, approverName, comment) => {
       const { canApprove } = get();
+      const roleInfo = getRoleInfo(approverRole, approverId, approverName);
+      const rejectComment = comment || `${roleInfo.roleName}审批拒绝`;
       let success = false;
+
       set(state => {
         let nextLeaves = [...state.leaveRequests];
         let nextSwaps = [...state.swapRequests];
         let nextTickets = [...state.exceptionTickets];
         const nextApprovals = [...state.approvalRecords];
 
-        const approverName = approverRole === 'hr' ? '人事管理员'
-          : approverRole === 'assistant_manager' ? '副店长'
-          : '店长';
-        const rejectComment = comment || `${approverName}审批拒绝`;
-
         if (sourceType === 'leave') {
           const leave = nextLeaves.find(l => l.id === sourceId);
-          if (!leave) return state;
-          if (!canApprove(leave.status, approverRole)) return state;
+          if (!leave || !canApprove(leave.status, approverRole, leave)) return state;
 
           nextLeaves = nextLeaves.map(l =>
             l.id === sourceId ? {
               ...l,
               status: 'rejected' as const,
               ...(approverRole === 'hr' ? { hrComment: rejectComment } : { managerComment: rejectComment }),
+              currentHandlerId: undefined,
+              currentHandlerName: undefined,
             } : l
           );
-          addApprovalRecord(sourceId, 'leave', approverRole, 'rejected', rejectComment, nextApprovals, 'reject');
+          addApprovalRecord(sourceId, 'leave', roleInfo.approverRole, roleInfo.roleId, roleInfo.roleName, 'rejected', rejectComment, nextApprovals, 'reject');
           success = true;
         }
 
         if (sourceType === 'swap') {
           const swap = nextSwaps.find(s => s.id === sourceId);
-          if (!swap) return state;
-          if (!canApprove(swap.status, approverRole)) return state;
+          if (!swap || !canApprove(swap.status, approverRole, swap)) return state;
 
           nextSwaps = nextSwaps.map(s =>
             s.id === sourceId ? {
               ...s,
               status: 'rejected' as const,
               ...(approverRole === 'hr' ? { hrComment: rejectComment } : { managerComment: rejectComment }),
+              currentHandlerId: undefined,
+              currentHandlerName: undefined,
             } : s
           );
-          addApprovalRecord(sourceId, 'swap', approverRole, 'rejected', rejectComment, nextApprovals, 'reject');
+          addApprovalRecord(sourceId, 'swap', roleInfo.approverRole, roleInfo.roleId, roleInfo.roleName, 'rejected', rejectComment, nextApprovals, 'reject');
           success = true;
         }
 
         if (sourceType === 'exception') {
           nextTickets = nextTickets.map(t =>
-            t.id === sourceId ? { ...t, status: 'rejected' as const, handler: approverName } : t
+            t.id === sourceId ? { ...t, status: 'rejected' as const, handler: roleInfo.roleName } : t
           );
-          addApprovalRecord(sourceId, 'exception', approverRole, 'rejected', rejectComment, nextApprovals, 'reject');
+          addApprovalRecord(sourceId, 'exception', roleInfo.approverRole, roleInfo.roleId, roleInfo.roleName, 'rejected', rejectComment, nextApprovals, 'reject');
           success = true;
         }
 
@@ -504,7 +569,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
           const leave = nextLeaves.find(l => l.id === sourceId);
           if (!leave || leave.status !== 'pending_store') return state;
           const created = parseISO(leave.createdAt);
-          if (differenceInHours(now, created) < 24) return state;
+          if (differenceInHours(now, created) < OVERDUE_HOURS) return state;
 
           nextLeaves = nextLeaves.map(l =>
             l.id === sourceId ? {
@@ -514,7 +579,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
             } : l
           );
           addApprovalRecord(
-            sourceId, 'leave', 'hr', leave.status,
+            sourceId, 'leave', 'hr', 'hr', '人事管理员', leave.status,
             `人事发起催办（第${(leave.reminderCount || 0) + 1}次）`,
             nextApprovals,
             'urge'
@@ -526,7 +591,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
           const swap = nextSwaps.find(s => s.id === sourceId);
           if (!swap || swap.status !== 'pending_store') return state;
           const created = parseISO(swap.createdAt);
-          if (differenceInHours(now, created) < 24) return state;
+          if (differenceInHours(now, created) < OVERDUE_HOURS) return state;
 
           nextSwaps = nextSwaps.map(s =>
             s.id === sourceId ? {
@@ -536,7 +601,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
             } : s
           );
           addApprovalRecord(
-            sourceId, 'swap', 'hr', swap.status,
+            sourceId, 'swap', 'hr', 'hr', '人事管理员', swap.status,
             `人事发起催办（第${(swap.reminderCount || 0) + 1}次）`,
             nextApprovals,
             'urge'
@@ -579,7 +644,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
               handoffRecords: [...(l.handoffRecords || []), handoffRecord],
             } : l
           );
-          addApprovalRecord(sourceId, 'leave', 'store_manager', 'pending_store',
+          addApprovalRecord(sourceId, 'leave', 'store_manager', 'store_manager', '店长', 'pending_store',
             `转交给${toHandlerName}：${reason}`, nextApprovals, 'handoff');
         }
 
@@ -592,7 +657,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
               handoffRecords: [...(s.handoffRecords || []), handoffRecord],
             } : s
           );
-          addApprovalRecord(sourceId, 'swap', 'store_manager', 'pending_store',
+          addApprovalRecord(sourceId, 'swap', 'store_manager', 'store_manager', '店长', 'pending_store',
             `转交给${toHandlerName}：${reason}`, nextApprovals, 'handoff');
         }
 
@@ -650,7 +715,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
     },
 
     resolveTicket: (ticketId) => {
-      const handler = get().currentRole === 'hr' ? '人事管理员' : '店长';
+      const handler = get().currentRole === 'hr' ? '人事管理员' : (get().currentRole === 'assistant_manager' ? '副店长' : '店长');
       set(state => ({
         exceptionTickets: state.exceptionTickets.map(t =>
           t.id === ticketId ? { ...t, status: 'resolved' as const, handler } : t
@@ -660,7 +725,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
     },
 
     rejectTicket: (ticketId) => {
-      const handler = get().currentRole === 'hr' ? '人事管理员' : '店长';
+      const handler = get().currentRole === 'hr' ? '人事管理员' : (get().currentRole === 'assistant_manager' ? '副店长' : '店长');
       set(state => ({
         exceptionTickets: state.exceptionTickets.map(t =>
           t.id === ticketId ? { ...t, status: 'rejected' as const, handler } : t
@@ -683,28 +748,36 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
       return get().lockedMonths.includes(key);
     },
 
-    adjustBonus: (summaryId, bonus, fine, reason = '手工调整') => {
-      const { isMonthLocked } = get();
+    addManualAdjustment: (summaryId, type, amount, reason) => {
+      const { isMonthLocked, currentRole } = get();
       const summary = get().summaries.find(s => s.id === summaryId);
       if (!summary) return false;
       if (isMonthLocked(summary.storeId, summary.year, summary.month)) return false;
+      if (amount <= 0) return false;
+
+      const { deltaBonus, deltaFine } = calcAdjustmentDelta(type, amount);
+      const operator = currentRole === 'hr' ? '人事管理员' : (currentRole === 'assistant_manager' ? '副店长' : '店长');
 
       set(state => {
         const nextSummaries = state.summaries.map(s => {
           if (s.id !== summaryId) return s;
           const adj: ManualAdjustment = {
             id: `adj-${Date.now()}`,
-            type: bonus > (s.bonus || 0) ? 'bonus' : fine > (s.fine || 0) ? 'fine' : 'bonus',
-            amount: Math.abs(bonus - (s.bonus || 0)) || Math.abs(fine - (s.fine || 0)),
+            type,
+            amount,
             reason,
-            operator: state.currentRole === 'hr' ? '人事管理员' : '店长',
+            operator,
             createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
+            deltaBonus,
+            deltaFine,
           };
           const existingAdjustments = s.manualAdjustments || [];
+          const newBonus = Math.max(0, (s.bonus || 0) + deltaBonus);
+          const newFine = Math.max(0, (s.fine || 0) + deltaFine);
           return {
             ...s,
-            bonus,
-            fine,
+            bonus: newBonus,
+            fine: newFine,
             manualAdjustments: [...existingAdjustments, adj],
           };
         });
@@ -712,6 +785,11 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
       });
       persist();
       return true;
+    },
+
+    adjustBonus: (summaryId, bonus, fine, reason = '手工调整') => {
+      return get().addManualAdjustment(summaryId, 'bonus_add', Math.max(0, bonus - (get().summaries.find(s => s.id === summaryId)?.bonus || 0)), reason) ||
+        get().addManualAdjustment(summaryId, 'fine_add', Math.max(0, fine - (get().summaries.find(s => s.id === summaryId)?.fine || 0)), reason);
     },
 
     recalculateSummaries: (storeId, year, month) => {
@@ -755,6 +833,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
               actualDays,
               fine: baseFine,
               bonus: 0,
+              manualAdjustments: [],
             };
           } else {
             nextSummaries.push({
@@ -850,12 +929,15 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         });
 
         manualAdjustments.forEach(adj => {
+          const typeLabel = adj.type === 'bonus_add' ? '加奖'
+            : adj.type === 'bonus_deduct' ? '扣回奖金'
+            : adj.type === 'fine_add' ? '扣款' : '减免罚款';
           impactItems.push({
             id: `impact-manual-${adj.id}`,
-            type: adj.type === 'bonus' ? 'manual_bonus' : 'manual_fine',
+            type: adj.deltaBonus > 0 || adj.type === 'bonus_add' ? 'manual_bonus' : 'manual_fine',
             date: adj.createdAt.slice(0, 10),
-            description: `${adj.type === 'bonus' ? '手工加奖' : '手工扣款'}：${adj.reason}`,
-            impactAmount: adj.type === 'bonus' ? adj.amount : -adj.amount,
+            description: `${typeLabel}：${adj.reason}（${adj.operator}）`,
+            impactAmount: adj.deltaBonus + (-adj.deltaFine),
             sourceId: adj.id,
             sourceType: `手工调整（${adj.operator}）`,
           });
@@ -880,6 +962,159 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
       });
 
       return details;
+    },
+
+    getApprovalBoardStats: () => {
+      const state = get();
+      const now = new Date();
+      const stats: ApprovalBoardStat[] = stores.map(store => {
+        const storeLeaves = state.leaveRequests.filter(l => l.storeId === store.id);
+        const storeSwaps = state.swapRequests.filter(s => s.storeId === store.id);
+        const allPending = [...storeLeaves, ...storeSwaps];
+
+        let pendingStore = 0, pendingHr = 0, overdue = 0, urged = 0;
+
+        allPending.forEach(req => {
+          if (req.status === 'pending_store') pendingStore++;
+          if (req.status === 'pending_hr') pendingHr++;
+          const created = parseISO(req.createdAt);
+          if ((req.status === 'pending_store' || req.status === 'pending_hr') &&
+              differenceInHours(now, created) >= OVERDUE_HOURS) {
+            overdue++;
+          }
+          if ((req.reminderCount || 0) > 0) urged++;
+        });
+
+        return {
+          storeId: store.id,
+          storeName: store.name,
+          pendingStore,
+          pendingHr,
+          overdue,
+          urged,
+        };
+      });
+      return stats;
+    },
+
+    getSettlementPreview: (storeId, year, month) => {
+      const state = get();
+      const store = stores.find(s => s.id === storeId);
+      const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+      const monthEnd = `${year}-${String(month).padStart(2, '0')}-${getDaysInMonth(year, month)}`;
+
+      const storeSummaries = state.summaries.filter(s => s.storeId === storeId && s.year === year && s.month === month);
+      const totalBonus = storeSummaries.reduce((sum, s) => sum + (s.bonus || 0), 0);
+      const totalFine = storeSummaries.reduce((sum, s) => sum + (s.fine || 0), 0);
+
+      const storeRecords = state.checkinRecords.filter(
+        r => r.storeId === storeId && r.date >= monthStart && r.date <= monthEnd
+      );
+      const abnormalCount = storeRecords.filter(r => r.status === 'late' || r.status === 'early_leave' || r.status === 'absent').length;
+
+      const storeTickets = state.exceptionTickets.filter(
+        t => t.storeId === storeId && t.date >= monthStart && t.date <= monthEnd
+      );
+
+      return {
+        storeId,
+        storeName: store?.name || '',
+        year,
+        month,
+        employeeCount: storeSummaries.length,
+        totalBonus,
+        totalFine,
+        netPay: totalBonus - totalFine,
+        abnormalCount,
+        exceptionCount: storeTickets.length,
+      };
+    },
+
+    generateSettlementFiles: (storeId, year, month) => {
+      const state = get();
+      const store = stores.find(s => s.id === storeId);
+      const monthStr = `${year}年${month}月`;
+      const auditDetails = state.getMonthAuditDetail(storeId, year, month);
+      const preview = state.getSettlementPreview(storeId, year, month);
+      const files: { name: string; content: string }[] = [];
+
+      // 1. 门店汇总表
+      let summaryContent = `${store?.name || ''} ${monthStr} 考勤门店汇总表\n`;
+      summaryContent += '='.repeat(60) + '\n\n';
+      summaryContent += `门店：${store?.name || ''}\n`;
+      summaryContent += `月份：${monthStr}\n`;
+      summaryContent += `员工数：${preview.employeeCount}\n`;
+      summaryContent += `总奖金：¥${preview.totalBonus}\n`;
+      summaryContent += `总罚款：¥${preview.totalFine}\n`;
+      summaryContent += `实发奖扣：¥${preview.netPay}\n`;
+      summaryContent += `异常打卡人次：${preview.abnormalCount}\n`;
+      summaryContent += `异常工单数：${preview.exceptionCount}\n\n`;
+      summaryContent += '员工明细汇总：\n';
+      summaryContent += '-'.repeat(60) + '\n';
+      summaryContent += '姓名\t出勤天数\t迟到\t早退\t缺勤\t请假\t奖金\t罚款\t实发\n';
+      summaryContent += '-'.repeat(60) + '\n';
+      auditDetails.forEach(d => {
+        const summary = state.summaries.find(s => s.employeeId === d.employeeId && s.year === year && s.month === month);
+        summaryContent += `${d.employeeName}\t${summary?.actualDays || 0}\t${summary?.lateCount || 0}\t${summary?.earlyLeaveCount || 0}\t${summary?.absentCount || 0}\t${summary?.leaveDays || 0}\t¥${d.totalBonus}\t¥${d.totalFine}\t¥${d.totalBonus - d.totalFine}\n`;
+      });
+      files.push({ name: `门店汇总表_${store?.name || ''}_${year}${month}.txt`, content: summaryContent });
+
+      // 2. 员工明细（每个员工一个文件）
+      auditDetails.forEach(d => {
+        let empContent = `${d.employeeName} ${monthStr} 考勤明细\n`;
+        empContent += '='.repeat(60) + '\n\n';
+        empContent += `门店：${store?.name || ''}\n`;
+        empContent += `员工：${d.employeeName}\n\n`;
+        empContent += '一、打卡影响\n';
+        d.absentRecords.forEach(r => empContent += `  ${r.date} 缺勤 -¥100\n`);
+        d.lateRecords.forEach(r => empContent += `  ${r.date} 迟到 -¥20\n`);
+        d.earlyLeaveRecords.forEach(r => empContent += `  ${r.date} 早退 -¥20\n`);
+        empContent += '\n二、请假记录\n';
+        d.approvedLeaves.forEach(l => empContent += `  ${l.startDate}~${l.endDate} ${l.leaveType} ${l.days}天\n`);
+        empContent += '\n三、异常工单\n';
+        d.resolvedExceptions.forEach(t => empContent += `  ${t.date} ${t.type} ${t.description} 状态:${t.status}\n`);
+        empContent += '\n四、手工调整\n';
+        d.manualAdjustments.forEach(adj => {
+          const label = adj.type === 'bonus_add' ? '加奖' : adj.type === 'bonus_deduct' ? '扣回奖金' : adj.type === 'fine_add' ? '扣款' : '减免罚款';
+          empContent += `  ${adj.createdAt} ${label} ¥${adj.amount} 原因:${adj.reason} 操作人:${adj.operator}\n`;
+        });
+        empContent += `\n\n合计：奖金 ¥${d.totalBonus}，罚款 ¥${d.totalFine}，实发 ¥${d.totalBonus - d.totalFine}\n`;
+        files.push({ name: `员工明细_${d.employeeName}_${year}${month}.txt`, content: empContent });
+      });
+
+      // 3. 调整记录汇总
+      let adjContent = `${store?.name || ''} ${monthStr} 手工调整记录\n`;
+      adjContent += '='.repeat(60) + '\n\n';
+      adjContent += '时间\t员工\t类型\t金额\t原因\t操作人\n';
+      adjContent += '-'.repeat(60) + '\n';
+      auditDetails.forEach(d => {
+        d.manualAdjustments.forEach(adj => {
+          const label = adj.type === 'bonus_add' ? '加奖' : adj.type === 'bonus_deduct' ? '扣回奖金' : adj.type === 'fine_add' ? '扣款' : '减免罚款';
+          adjContent += `${adj.createdAt}\t${d.employeeName}\t${label}\t¥${adj.amount}\t${adj.reason}\t${adj.operator}\n`;
+        });
+      });
+      files.push({ name: `调整记录汇总_${store?.name || ''}_${year}${month}.txt`, content: adjContent });
+
+      // 4. 出勤证明打包
+      auditDetails.forEach(d => {
+        const emp = employees.find(e => e.id === d.employeeId);
+        let certContent = `出 勤 证 明\n`;
+        certContent += '='.repeat(60) + '\n\n';
+        certContent += `兹证明 ${d.employeeName}（岗位：${emp?.position || ''}）系我司${store?.name || ''}员工。\n\n`;
+        certContent += `${monthStr}出勤情况如下：\n`;
+        certContent += `  应出勤天数：${state.summaries.find(s => s.employeeId === d.employeeId && s.year === year && s.month === month)?.workDays || 0}\n`;
+        certContent += `  实际出勤：${state.summaries.find(s => s.employeeId === d.employeeId && s.year === year && s.month === month)?.actualDays || 0}\n`;
+        certContent += `  迟到：${state.summaries.find(s => s.employeeId === d.employeeId && s.year === year && s.month === month)?.lateCount || 0}次\n`;
+        certContent += `  早退：${state.summaries.find(s => s.employeeId === d.employeeId && s.year === year && s.month === month)?.earlyLeaveCount || 0}次\n`;
+        certContent += `  缺勤：${state.summaries.find(s => s.employeeId === d.employeeId && s.year === year && s.month === month)?.absentCount || 0}次\n`;
+        certContent += `  请假：${state.summaries.find(s => s.employeeId === d.employeeId && s.year === year && s.month === month)?.leaveDays || 0}天\n\n`;
+        certContent += `月度奖扣：奖金 ¥${d.totalBonus}，罚款 ¥${d.totalFine}，实发 ¥${d.totalBonus - d.totalFine}\n\n`;
+        certContent += `证明单位：${store?.name || ''}\n`;
+        certContent += `出具日期：${format(new Date(), 'yyyy-MM-dd')}\n`;
+        files.push({ name: `出勤证明_${d.employeeName}_${year}${month}.txt`, content: certContent });
+      });
+
+      return files;
     },
 
     toggleBlacklistRule: (ruleId) => {

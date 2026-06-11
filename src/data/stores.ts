@@ -10,6 +10,10 @@ export const stores: Store[] = [
     lng: 116.4436,
     employeeCount: 12,
     createdAt: '2023-01-15',
+    assistantManagers: [
+      { id: 'asm-001-1', name: '李明-副店长' },
+      { id: 'asm-001-2', name: '王芳-副店长' },
+    ],
   },
   {
     id: 'store-002',
@@ -20,6 +24,10 @@ export const stores: Store[] = [
     lng: 116.3165,
     employeeCount: 15,
     createdAt: '2023-03-20',
+    assistantManagers: [
+      { id: 'asm-002-1', name: '陈刚-副店长' },
+      { id: 'asm-002-2', name: '赵丽-副店长' },
+    ],
   },
   {
     id: 'store-003',
@@ -30,6 +38,10 @@ export const stores: Store[] = [
     lng: 116.3728,
     employeeCount: 10,
     createdAt: '2023-06-10',
+    assistantManagers: [
+      { id: 'asm-003-1', name: '孙浩-副店长' },
+      { id: 'asm-003-2', name: '周敏-副店长' },
+    ],
   },
   {
     id: 'store-004',
@@ -40,6 +52,10 @@ export const stores: Store[] = [
     lng: 116.4108,
     employeeCount: 14,
     createdAt: '2023-09-05',
+    assistantManagers: [
+      { id: 'asm-004-1', name: '吴强-副店长' },
+      { id: 'asm-004-2', name: '郑雪-副店长' },
+    ],
   },
   {
     id: 'store-005',
@@ -50,5 +66,8 @@ export const stores: Store[] = [
     lng: 116.2872,
     employeeCount: 8,
     createdAt: '2024-01-20',
+    assistantManagers: [
+      { id: 'asm-005-1', name: '冯磊-副店长' },
+    ],
   },
 ];

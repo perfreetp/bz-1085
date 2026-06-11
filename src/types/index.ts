@@ -12,7 +12,7 @@ export type TicketStatus = 'pending' | 'processing' | 'resolved' | 'rejected';
 
 export type Priority = 'high' | 'medium' | 'low';
 
-export type UserRole = 'store_manager' | 'hr' | 'employee';
+export type UserRole = 'store_manager' | 'hr' | 'employee' | 'assistant_manager';
 
 export interface Store {
   id: string;
@@ -23,6 +23,7 @@ export interface Store {
   lng: number;
   employeeCount: number;
   createdAt: string;
+  assistantManagers?: { id: string; name: string }[];
 }
 
 export interface Employee {
@@ -171,13 +172,17 @@ export interface AttendanceSummary {
   manualAdjustments?: ManualAdjustment[];
 }
 
+export type AdjustmentType = 'bonus_add' | 'fine_add' | 'fine_reduce' | 'bonus_deduct';
+
 export interface ManualAdjustment {
   id: string;
-  type: 'bonus' | 'fine';
+  type: AdjustmentType;
   amount: number;
   reason: string;
   operator: string;
   createdAt: string;
+  deltaBonus: number;
+  deltaFine: number;
 }
 
 export interface StoreRanking {
@@ -233,4 +238,26 @@ export interface MonthAuditDetail {
   lateRecords: CheckinRecord[];
   earlyLeaveRecords: CheckinRecord[];
   manualAdjustments: ManualAdjustment[];
+}
+
+export interface ApprovalBoardStat {
+  storeId: string;
+  storeName: string;
+  pendingStore: number;
+  pendingHr: number;
+  overdue: number;
+  urged: number;
+}
+
+export interface SettlementPreview {
+  storeId: string;
+  storeName: string;
+  year: number;
+  month: number;
+  employeeCount: number;
+  totalBonus: number;
+  totalFine: number;
+  netPay: number;
+  abnormalCount: number;
+  exceptionCount: number;
 }

@@ -26,7 +26,11 @@ import {
   AlertCircle,
   Edit3,
   PieChart as PieChartIcon,
-  ChevronRight
+  ChevronRight,
+  ShieldMinus,
+  MinusCircle,
+  Package,
+  Loader2
 } from 'lucide-react';
 import {
   BarChart,
@@ -48,7 +52,7 @@ import { stores } from '@/data/stores';
 import { getEmployeesByStore, employees } from '@/data/employees';
 import { format } from 'date-fns';
 import { cn, getStatusColor, getStatusLabel, getLeaveTypeLabel } from '@/utils';
-import type { MonthAuditDetail } from '@/types';
+import type { MonthAuditDetail, AdjustmentType, SettlementPreview } from '@/types';
 
 type SummaryTab = 'ranking' | 'calculation' | 'lock' | 'certificate' | 'blacklist';
 type DrawerTab = 'clockIn' | 'leave' | 'exception' | 'adjustment' | 'summary';
@@ -60,6 +64,31 @@ const DRAWER_TABS: { key: DrawerTab; label: string; icon: typeof Calendar }[] = 
   { key: 'adjustment', label: '手工调整', icon: Edit3 },
   { key: 'summary', label: '汇总核对', icon: PieChartIcon },
 ];
+
+const ADJUSTMENT_TYPES: {
+  key: AdjustmentType;
+  label: string;
+  icon: typeof TrendingUp;
+  color: string;
+  bgColor: string;
+  borderColor: string;
+  textColor: string;
+}[] = [
+  { key: 'bonus_add', label: '加奖', icon: TrendingUp, color: 'text-emerald-600', bgColor: 'bg-emerald-50', borderColor: 'border-emerald-500', textColor: 'text-emerald-600' },
+  { key: 'fine_add', label: '扣款', icon: TrendingDown, color: 'text-red-600', bgColor: 'bg-red-50', borderColor: 'border-red-500', textColor: 'text-red-600' },
+  { key: 'fine_reduce', label: '减免罚款', icon: ShieldMinus, color: 'text-amber-600', bgColor: 'bg-amber-50', borderColor: 'border-amber-500', textColor: 'text-amber-600' },
+  { key: 'bonus_deduct', label: '扣回奖金', icon: MinusCircle, color: 'text-orange-600', bgColor: 'bg-orange-50', borderColor: 'border-orange-500', textColor: 'text-orange-600' },
+];
+
+const getAdjustmentTypeInfo = (type: AdjustmentType) => ADJUSTMENT_TYPES.find(t => t.key === type) || ADJUSTMENT_TYPES[0];
+
+const getAdjustmentSign = (type: AdjustmentType): '+' | '-' => {
+  return (type === 'bonus_add' || type === 'fine_reduce') ? '+' : '-';
+};
+
+const getAdjustmentColorClass = (type: AdjustmentType): string => {
+  return (type === 'bonus_add' || type === 'fine_reduce') ? 'text-emerald-600' : 'text-red-600';
+};
 
 export default function Summary() {
   const {
@@ -73,7 +102,10 @@ export default function Summary() {
     adjustBonus,
     toggleBlacklistRule,
     recalculateSummaries,
-    getMonthAuditDetail
+    getMonthAuditDetail,
+    addManualAdjustment,
+    getSettlementPreview,
+    generateSettlementFiles
   } = useBusinessStore();
 
   const [activeTab, setActiveTab] = useState<SummaryTab>('ranking');
@@ -82,14 +114,25 @@ export default function Summary() {
   const [toast, setToast] = useState<string | null>(null);
   const [searchName, setSearchName] = useState('');
   const [bonusSearchName, setBonusSearchName] = useState('');
-  const [adjustModal, setAdjustModal] = useState<{ summaryId: string; empName: string; bonus: number; fine: number } | null>(null);
-  const [adjustBonusVal, setAdjustBonusVal] = useState(0);
-  const [adjustFineVal, setAdjustFineVal] = useState(0);
-  const [auditModal, setAuditModal] = useState<MonthAuditDetail | null>(null);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerDetail, setDrawerDetail] = useState<MonthAuditDetail | null>(null);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('clockIn');
+  const [auditModal, setAuditModal] = useState<MonthAuditDetail | null>(null);
+
+  const [adjustModal, setAdjustModal] = useState<{
+    summaryId: string;
+    empName: string;
+    bonus: number;
+    fine: number;
+  } | null>(null);
+  const [adjustType, setAdjustType] = useState<AdjustmentType>('bonus_add');
+  const [adjustAmount, setAdjustAmount] = useState<string>('');
+  const [adjustReason, setAdjustReason] = useState('');
+
+  const [settlementModalOpen, setSettlementModalOpen] = useState(false);
+  const [settlementPreview, setSettlementPreview] = useState<SettlementPreview | null>(null);
+  const [isDownloadingSettlement, setIsDownloadingSettlement] = useState(false);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -97,7 +140,6 @@ export default function Summary() {
   };
 
   const currentStore = stores.find(s => s.id === currentStoreId);
-
   const monthLocked = isMonthLocked(currentStoreId, currentYear, selectedMonth);
 
   const storeSummaries = useMemo(() =>
@@ -235,19 +277,37 @@ export default function Summary() {
   };
 
   const handleOpenAdjust = (summaryId: string) => {
+    if (monthLocked) {
+      showToast('已锁账月份不可调账');
+      return;
+    }
     const s = storeSummaries.find(item => item.id === summaryId);
     if (!s) return;
     const emp = employees.find(e => e.id === s.employeeId);
     setAdjustModal({ summaryId, empName: emp?.name || '', bonus: s.bonus, fine: s.fine });
-    setAdjustBonusVal(s.bonus);
-    setAdjustFineVal(s.fine);
+    setAdjustType('bonus_add');
+    setAdjustAmount('');
+    setAdjustReason('');
   };
 
   const handleConfirmAdjust = () => {
     if (!adjustModal) return;
-    adjustBonus(adjustModal.summaryId, adjustBonusVal, adjustFineVal);
-    showToast(`已调整 ${adjustModal.empName} 的奖扣明细`);
-    setAdjustModal(null);
+    const amountNum = Number(adjustAmount);
+    if (!amountNum || amountNum <= 0) {
+      showToast('请输入有效的金额');
+      return;
+    }
+    if (!adjustReason.trim()) {
+      showToast('请输入调整原因');
+      return;
+    }
+    const success = addManualAdjustment(adjustModal.summaryId, adjustType, amountNum, adjustReason.trim());
+    if (success) {
+      showToast(`已${getAdjustmentTypeInfo(adjustType).label} ¥${amountNum}`);
+      setAdjustModal(null);
+    } else {
+      showToast('调账失败，请检查数据');
+    }
   };
 
   const handleOpenAudit = (employeeId: string) => {
@@ -272,6 +332,54 @@ export default function Summary() {
     setDrawerOpen(false);
     setTimeout(() => setDrawerDetail(null), 300);
   };
+
+  const handleOpenSettlement = () => {
+    const preview = getSettlementPreview(currentStoreId, currentYear, selectedMonth);
+    setSettlementPreview(preview);
+    setSettlementModalOpen(true);
+  };
+
+  const handleDownloadSettlement = () => {
+    setIsDownloadingSettlement(true);
+    try {
+      const files = generateSettlementFiles(currentStoreId, currentYear, selectedMonth);
+      files.forEach((file, index) => {
+        setTimeout(() => {
+          const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = file.name;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, index * 200);
+      });
+      showToast(`已生成并下载 ${files.length} 个结算文件`);
+    } catch (e) {
+      showToast('生成结算文件失败');
+    } finally {
+      setTimeout(() => {
+        setIsDownloadingSettlement(false);
+        setSettlementModalOpen(false);
+      }, 1000);
+    }
+  };
+
+  const adjustPreview = useMemo(() => {
+    if (!adjustModal) return { bonus: 0, fine: 0, net: 0 };
+    const amountNum = Number(adjustAmount) || 0;
+    let newBonus = adjustModal.bonus;
+    let newFine = adjustModal.fine;
+    switch (adjustType) {
+      case 'bonus_add': newBonus += amountNum; break;
+      case 'bonus_deduct': newBonus = Math.max(0, newBonus - amountNum); break;
+      case 'fine_add': newFine += amountNum; break;
+      case 'fine_reduce': newFine = Math.max(0, newFine - amountNum); break;
+    }
+    return { bonus: newBonus, fine: newFine, net: newBonus - newFine };
+  }, [adjustModal, adjustType, adjustAmount]);
 
   const sortedImpactItems = useMemo(() => {
     if (!auditModal) return [];
@@ -318,6 +426,21 @@ export default function Summary() {
     return [...drawerDetail.manualAdjustments].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [drawerDetail]);
 
+  const drawerAdjustmentTotal = useMemo(() => {
+    if (!drawerDetail) return { bonusAdd: 0, bonusDeduct: 0, fineAdd: 0, fineReduce: 0, net: 0 };
+    let bonusAdd = 0, bonusDeduct = 0, fineAdd = 0, fineReduce = 0;
+    drawerDetail.manualAdjustments.forEach(adj => {
+      switch (adj.type) {
+        case 'bonus_add': bonusAdd += adj.amount; break;
+        case 'bonus_deduct': bonusDeduct += adj.amount; break;
+        case 'fine_add': fineAdd += adj.amount; break;
+        case 'fine_reduce': fineReduce += adj.amount; break;
+      }
+    });
+    const net = bonusAdd - bonusDeduct - fineAdd + fineReduce;
+    return { bonusAdd, bonusDeduct, fineAdd, fineReduce, net };
+  }, [drawerDetail]);
+
   const autoCalculate = useMemo(() => {
     if (!drawerDetail) return { amount: 0, breakdown: [] as string[] };
     const absent = drawerDetail.absentRecords.length * 100;
@@ -331,18 +454,19 @@ export default function Summary() {
   }, [drawerDetail]);
 
   const manualTotal = useMemo(() => {
-    if (!drawerDetail) return { bonus: 0, fine: 0, breakdown: [] as string[] };
+    if (!drawerDetail) return { bonus: 0, fine: 0, net: 0, breakdown: [] as string[] };
     let bonus = 0;
     let fine = 0;
     const breakdown: string[] = [];
     drawerDetail.manualAdjustments.forEach(adj => {
-      if (adj.type === 'bonus') {
-        bonus += adj.amount;
-        breakdown.push(`加奖：${adj.reason} +¥${adj.amount}`);
+      const typeInfo = getAdjustmentTypeInfo(adj.type);
+      const sign = getAdjustmentSign(adj.type);
+      if (adj.type === 'bonus_add' || adj.type === 'bonus_deduct') {
+        bonus += adj.deltaBonus;
       } else {
-        fine += adj.amount;
-        breakdown.push(`扣款：${adj.reason} -¥${adj.amount}`);
+        fine += adj.deltaFine;
       }
+      breakdown.push(`${typeInfo.label}：${adj.reason} ${sign}¥${adj.amount}`);
     });
     return { bonus, fine, net: bonus - fine, breakdown };
   }, [drawerDetail]);
@@ -388,46 +512,262 @@ export default function Summary() {
 
       {adjustModal && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 space-y-5">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 space-y-5">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-gray-800">调整奖扣 — {adjustModal.empName}</h3>
+              <h3 className="text-lg font-semibold text-gray-800">调账 — {adjustModal.empName}</h3>
               <button onClick={() => setAdjustModal(null)} className="text-gray-400 hover:text-gray-600">
                 <X size={20} />
               </button>
             </div>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-1">奖金（元）</label>
-                <input
-                  type="number"
-                  value={adjustBonusVal}
-                  onChange={e => setAdjustBonusVal(Number(e.target.value))}
-                  className="w-full h-10 px-3 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                />
+
+            {monthLocked ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center">
+                <AlertTriangle size={24} className="mx-auto text-amber-500 mb-2" />
+                <p className="text-sm font-medium text-amber-700">已锁账月份不可调账</p>
               </div>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-600 mb-2">调整类型</label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {ADJUSTMENT_TYPES.map(type => {
+                      const Icon = type.icon;
+                      const selected = adjustType === type.key;
+                      return (
+                        <button
+                          key={type.key}
+                          onClick={() => setAdjustType(type.key)}
+                          className={cn(
+                            'flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 transition-all',
+                            selected
+                              ? `${type.bgColor} ${type.borderColor} ${type.textColor}`
+                              : 'bg-white border-gray-200 text-gray-500 hover:border-gray-300'
+                          )}
+                        >
+                          <Icon size={20} />
+                          <span className="text-xs font-medium">{type.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-600 mb-1">金额（元）</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={adjustAmount}
+                    onChange={e => setAdjustAmount(e.target.value)}
+                    placeholder="请输入正数金额"
+                    className="w-full h-10 px-3 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-600 mb-1">
+                    调整原因 <span className="text-red-500">*</span>
+                  </label>
+                  <textarea
+                    value={adjustReason}
+                    onChange={e => setAdjustReason(e.target.value)}
+                    placeholder="请详细说明调整原因"
+                    rows={3}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 resize-none"
+                  />
+                </div>
+
+                <div className="bg-gradient-to-br from-gray-50 to-slate-50 rounded-lg p-4 border border-gray-100">
+                  <p className="text-xs text-gray-500 mb-3">当前奖扣余额预览</p>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="text-center">
+                      <p className="text-xs text-gray-500 mb-1">当前奖金</p>
+                      <p className="text-lg font-bold text-emerald-600">¥{adjustPreview.bonus}</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-xs text-gray-500 mb-1">当前罚款</p>
+                      <p className="text-lg font-bold text-red-600">¥{adjustPreview.fine}</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-xs text-gray-500 mb-1">调整后实发</p>
+                      <p className={cn(
+                        'text-lg font-bold',
+                        adjustPreview.net >= 0 ? 'text-cyan-600' : 'text-red-600'
+                      )}>
+                        {adjustPreview.net >= 0 ? '+' : ''}¥{adjustPreview.net}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3">
+                  <button
+                    onClick={() => setAdjustModal(null)}
+                    className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={handleConfirmAdjust}
+                    className="px-4 py-2 text-sm text-white bg-cyan-500 rounded-lg hover:bg-cyan-600 transition-colors"
+                  >
+                    确认调整
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {settlementModalOpen && settlementPreview && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
               <div>
-                <label className="block text-sm font-medium text-gray-600 mb-1">罚款（元）</label>
-                <input
-                  type="number"
-                  value={adjustFineVal}
-                  onChange={e => setAdjustFineVal(Number(e.target.value))}
-                  className="w-full h-10 px-3 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                />
+                <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                  <Package size={20} className="text-cyan-500" />
+                  月度结算包
+                </h3>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  {settlementPreview.storeName} · {currentYear}年{selectedMonth}月
+                </p>
               </div>
+              <button onClick={() => setSettlementModalOpen(false)} className="text-gray-400 hover:text-gray-600">
+                <X size={20} />
+              </button>
             </div>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setAdjustModal(null)}
-                className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleConfirmAdjust}
-                className="px-4 py-2 text-sm text-white bg-cyan-500 rounded-lg hover:bg-cyan-600 transition-colors"
-              >
-                确认调整
-              </button>
+
+            <div className="flex-1 flex flex-col">
+              <div className="p-5 space-y-4" style={{ height: '60%' }}>
+                <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Eye size={16} className="text-cyan-500" />
+                  数据预览
+                </h4>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-xl p-5 border border-blue-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Users size={18} className="text-blue-500" />
+                      <p className="text-sm font-medium text-blue-700">员工总数</p>
+                    </div>
+                    <p className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">
+                      {settlementPreview.employeeCount}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">人</p>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-xl p-5 border border-emerald-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <TrendingUp size={18} className="text-emerald-500" />
+                      <p className="text-sm font-medium text-emerald-700">总奖金</p>
+                    </div>
+                    <p className="text-4xl font-bold bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">
+                      ¥{settlementPreview.totalBonus.toLocaleString()}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">元</p>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-red-50 to-rose-50 rounded-xl p-5 border border-red-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <TrendingDown size={18} className="text-red-500" />
+                      <p className="text-sm font-medium text-red-700">总罚款</p>
+                    </div>
+                    <p className="text-4xl font-bold bg-gradient-to-r from-red-600 to-rose-600 bg-clip-text text-transparent">
+                      ¥{settlementPreview.totalFine.toLocaleString()}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">元</p>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-cyan-50 to-blue-50 rounded-xl p-5 border border-cyan-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <DollarSign size={18} className="text-cyan-500" />
+                      <p className="text-sm font-medium text-cyan-700">实发奖扣</p>
+                    </div>
+                    <p className={cn(
+                      'text-4xl font-bold bg-clip-text text-transparent',
+                      settlementPreview.netPay >= 0
+                        ? 'bg-gradient-to-r from-cyan-600 to-blue-600'
+                        : 'bg-gradient-to-r from-red-600 to-rose-600'
+                    )}>
+                      {settlementPreview.netPay >= 0 ? '+' : ''}¥{settlementPreview.netPay.toLocaleString()}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">元</p>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-amber-50 to-orange-50 rounded-xl p-5 border border-amber-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <AlertTriangle size={18} className="text-amber-500" />
+                      <p className="text-sm font-medium text-amber-700">异常打卡人次</p>
+                    </div>
+                    <p className="text-4xl font-bold bg-gradient-to-r from-amber-600 to-orange-600 bg-clip-text text-transparent">
+                      {settlementPreview.abnormalCount}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">次</p>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-violet-50 to-purple-50 rounded-xl p-5 border border-violet-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <AlertCircle size={18} className="text-violet-500" />
+                      <p className="text-sm font-medium text-violet-700">异常工单数</p>
+                    </div>
+                    <p className="text-4xl font-bold bg-gradient-to-r from-violet-600 to-purple-600 bg-clip-text text-transparent">
+                      {settlementPreview.exceptionCount}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">单</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-gray-100 p-5 bg-gray-50" style={{ height: '40%' }}>
+                <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2 mb-3">
+                  <Download size={16} className="text-cyan-500" />
+                  打包下载
+                </h4>
+                <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+                  <p className="text-xs text-gray-500 mb-2">点击「导出结算包」会生成并下载以下文件：</p>
+                  <ul className="space-y-1.5 text-xs text-gray-600">
+                    <li className="flex items-center gap-2">
+                      <FileText size={12} className="text-gray-400" />
+                      门店汇总表_门店名_YYYYMM.txt
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <FileText size={12} className="text-gray-400" />
+                      员工明细_姓名_YYYYMM.txt（每个员工1份）
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <FileText size={12} className="text-gray-400" />
+                      调整记录汇总_门店名_YYYYMM.txt
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <FileText size={12} className="text-gray-400" />
+                      出勤证明_姓名_YYYYMM.txt（每个员工1份）
+                    </li>
+                  </ul>
+                </div>
+                <button
+                  onClick={handleDownloadSettlement}
+                  disabled={isDownloadingSettlement}
+                  className={cn(
+                    'w-full py-3 rounded-lg font-medium text-white transition-all flex items-center justify-center gap-2',
+                    isDownloadingSettlement
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'bg-gradient-to-r from-cyan-500 to-blue-500 hover:shadow-lg'
+                  )}
+                >
+                  {isDownloadingSettlement ? (
+                    <>
+                      <Loader2 size={18} className="animate-spin" />
+                      正在生成并下载...
+                    </>
+                  ) : (
+                    <>
+                      <Package size={18} />
+                      导出结算包
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -949,28 +1289,52 @@ export default function Summary() {
 
               {drawerTab === 'adjustment' && (
                 <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                      <Edit3 size={16} className="text-amber-500" />
-                      手工调整记录
-                      <span className="text-xs bg-amber-100 text-amber-600 px-2 py-0.5 rounded-full font-normal">
-                        共{drawerAdjustments.length}条
-                      </span>
-                    </h4>
-                    {!monthLocked && (
-                      <button
-                        onClick={() => {
-                          const summary = storeSummaries.find(s => s.employeeId === drawerDetail?.employeeId);
-                          if (summary) handleOpenAdjust(summary.id);
-                          handleCloseDrawer();
-                        }}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
-                      >
-                        <Edit3 size={12} />
-                        新增调整
-                      </button>
-                    )}
+                  <div className="bg-gradient-to-br from-amber-50 to-yellow-50 rounded-xl p-4 border border-amber-200 mb-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Edit3 size={16} className="text-amber-600" />
+                        <span className="text-sm font-medium text-amber-800">手工调整合计：净影响</span>
+                        <span className={cn(
+                          'text-xl font-bold',
+                          drawerAdjustmentTotal.net >= 0 ? 'text-emerald-600' : 'text-red-600'
+                        )}>
+                          {drawerAdjustmentTotal.net >= 0 ? '+' : ''}¥{drawerAdjustmentTotal.net}
+                        </span>
+                      </div>
+                      {!monthLocked && (
+                        <button
+                          onClick={() => {
+                            const summary = storeSummaries.find(s => s.employeeId === drawerDetail?.employeeId);
+                            if (summary) handleOpenAdjust(summary.id);
+                            handleCloseDrawer();
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
+                        >
+                          <Edit3 size={12} />
+                          新增调整
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-amber-200">
+                      <div className="text-center">
+                        <p className="text-xs text-emerald-600">加奖</p>
+                        <p className="text-sm font-bold text-emerald-600">+¥{drawerAdjustmentTotal.bonusAdd}</p>
+                      </div>
+                      <div className="text-center">
+                        <p className="text-xs text-red-600">扣回奖金</p>
+                        <p className="text-sm font-bold text-red-600">-¥{drawerAdjustmentTotal.bonusDeduct}</p>
+                      </div>
+                      <div className="text-center">
+                        <p className="text-xs text-red-600">扣款</p>
+                        <p className="text-sm font-bold text-red-600">-¥{drawerAdjustmentTotal.fineAdd}</p>
+                      </div>
+                      <div className="text-center">
+                        <p className="text-xs text-emerald-600">减免罚款</p>
+                        <p className="text-sm font-bold text-emerald-600">+¥{drawerAdjustmentTotal.fineReduce}</p>
+                      </div>
+                    </div>
                   </div>
+
                   {drawerAdjustments.length === 0 ? (
                     <div className="text-center py-12 bg-gray-50 rounded-xl text-sm text-gray-400">
                       <Edit3 size={40} className="mx-auto mb-3 text-gray-300" />
@@ -989,29 +1353,34 @@ export default function Summary() {
                           </tr>
                         </thead>
                         <tbody>
-                          {drawerAdjustments.map(adj => (
-                            <tr key={adj.id} className="border-t border-gray-100 hover:bg-amber-50/50">
-                              <td className="py-3 px-4 text-sm text-gray-700 whitespace-nowrap">{adj.createdAt}</td>
-                              <td className="py-3 px-4">
-                                <span className={cn(
-                                  'px-2.5 py-1 text-xs font-medium rounded-full',
-                                  adj.type === 'bonus'
-                                    ? 'bg-emerald-100 text-emerald-700'
-                                    : 'bg-red-100 text-red-700'
+                          {drawerAdjustments.map(adj => {
+                            const typeInfo = getAdjustmentTypeInfo(adj.type);
+                            const sign = getAdjustmentSign(adj.type);
+                            const colorClass = getAdjustmentColorClass(adj.type);
+                            return (
+                              <tr key={adj.id} className="border-t border-gray-100 hover:bg-amber-50/50">
+                                <td className="py-3 px-4 text-sm text-gray-700 whitespace-nowrap">{adj.createdAt}</td>
+                                <td className="py-3 px-4">
+                                  <span className={cn(
+                                    'inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full',
+                                    typeInfo.bgColor,
+                                    typeInfo.textColor
+                                  )}>
+                                    <typeInfo.icon size={12} />
+                                    {typeInfo.label}
+                                  </span>
+                                </td>
+                                <td className={cn(
+                                  'py-3 px-4 text-center text-sm font-bold',
+                                  colorClass
                                 )}>
-                                  {adj.type === 'bonus' ? '加奖' : '扣款'}
-                                </span>
-                              </td>
-                              <td className={cn(
-                                'py-3 px-4 text-center text-sm font-bold',
-                                adj.type === 'bonus' ? 'text-emerald-600' : 'text-red-600'
-                              )}>
-                                {adj.type === 'bonus' ? '+' : '-'}¥{adj.amount}
-                              </td>
-                              <td className="py-3 px-4 text-sm text-gray-600">{adj.reason}</td>
-                              <td className="py-3 px-4 text-right text-sm text-gray-500">{adj.operator}</td>
-                            </tr>
-                          ))}
+                                  {sign}¥{adj.amount}
+                                </td>
+                                <td className="py-3 px-4 text-sm text-gray-600">{adj.reason}</td>
+                                <td className="py-3 px-4 text-right text-sm text-gray-500">{adj.operator}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -1067,11 +1436,19 @@ export default function Summary() {
                       <div className="space-y-1.5 border-t border-amber-200 pt-3">
                         <div className="flex items-center justify-between text-xs">
                           <span className="text-emerald-600">加奖合计</span>
-                          <span className="font-medium text-emerald-600">+¥{manualTotal.bonus || 0}</span>
+                          <span className="font-medium text-emerald-600">+¥{drawerAdjustmentTotal.bonusAdd || 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-red-600">扣回奖金</span>
+                          <span className="font-medium text-red-600">-¥{drawerAdjustmentTotal.bonusDeduct || 0}</span>
                         </div>
                         <div className="flex items-center justify-between text-xs">
                           <span className="text-red-600">扣款合计</span>
-                          <span className="font-medium text-red-600">-¥{manualTotal.fine || 0}</span>
+                          <span className="font-medium text-red-600">-¥{drawerAdjustmentTotal.fineAdd || 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-emerald-600">减免罚款</span>
+                          <span className="font-medium text-emerald-600">+¥{drawerAdjustmentTotal.fineReduce || 0}</span>
                         </div>
                       </div>
                     </div>
@@ -1117,7 +1494,7 @@ export default function Summary() {
                         <span className="w-2 h-2 mt-2 rounded-full bg-amber-400 flex-shrink-0" />
                         <p>
                           <span className="font-medium text-gray-700">手工调整合计：</span>
-                          所有加奖金额之和 - 所有扣款金额之和
+                          加奖 - 扣回奖金 - 扣款 + 减免罚款
                         </p>
                       </div>
                       <div className="flex items-start gap-3">
@@ -1166,6 +1543,13 @@ export default function Summary() {
               <option key={i + 1} value={i + 1}>{i + 1}月</option>
             ))}
           </select>
+          <button
+            onClick={handleOpenSettlement}
+            className="px-4 py-2 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2"
+          >
+            <Package size={16} />
+            月度结算包
+          </button>
           <button className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2">
             <Download size={16} />
             导出报表
@@ -1758,4 +2142,3 @@ export default function Summary() {
     </div>
   );
 }
-

@@ -30,6 +30,16 @@ export default function Header() {
             店长视角
           </button>
           <button
+            onClick={() => setCurrentRole('assistant_manager')}
+            className={`px-3 py-1.5 text-xs rounded-md transition-all ${
+              currentRole === 'assistant_manager'
+                ? 'bg-white text-slate-800 shadow-sm font-medium'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            副店长视角
+          </button>
+          <button
             onClick={() => setCurrentRole('hr')}
             className={`px-3 py-1.5 text-xs rounded-md transition-all ${
               currentRole === 'hr'

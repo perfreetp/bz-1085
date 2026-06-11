@@ -19,6 +19,7 @@ import {
   ArrowRightLeft,
   X,
   HelpCircle,
+  Gauge,
 } from 'lucide-react';
 import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
@@ -26,12 +27,13 @@ import { employees } from '@/data/employees';
 import { leaveTypeLabels } from '@/data/leaves';
 import { exceptionTypeLabels } from '@/data/exceptions';
 import { cn, getStatusColor, getStatusLabel, getShiftLabel } from '@/utils';
-import type { ApprovalStatus, UserRole, ApprovalAction } from '@/types';
-import { differenceInHours, parseISO } from 'date-fns';
+import type { ApprovalStatus, UserRole, ApprovalAction, ApprovalBoardStat } from '@/types';
+import { format, differenceInHours, parseISO } from 'date-fns';
 
 type ApprovalTab = 'pending' | 'approved' | 'rejected';
 type ApprovalType = 'all' | 'leave' | 'swap' | 'exception';
 type StageFilter = 'all' | 'pending_store' | 'pending_hr';
+type BoardFilterType = 'pendingStore' | 'pendingHr' | 'overdue' | 'urged' | null;
 
 interface ApprovalItem {
   id: string;
@@ -48,6 +50,8 @@ interface ApprovalItem {
   managerComment?: string;
   hrComment?: string;
   reminderCount?: number;
+  currentHandlerId?: string;
+  currentHandlerName?: string;
   handoffRecords?: Array<{
     id: string;
     fromHandlerName: string;
@@ -61,11 +65,6 @@ interface AssistantManager {
   id: string;
   name: string;
 }
-
-const ASSISTANT_MANAGERS: AssistantManager[] = [
-  { id: 'asm-001', name: '李明-副店长' },
-  { id: 'asm-002', name: '王芳-副店长' },
-];
 
 interface TooltipProps {
   text: string;
@@ -105,6 +104,7 @@ export default function Approval() {
     canApprove,
     urgeRequest,
     handoffRequest,
+    getApprovalBoardStats,
   } = useBusinessStore();
 
   const [activeTab, setActiveTab] = useState<ApprovalTab>('pending');
@@ -123,7 +123,16 @@ export default function Approval() {
   const [handoffTargetId, setHandoffTargetId] = useState('');
   const [handoffReason, setHandoffReason] = useState('');
 
-  const approverRole = currentRole === 'hr' ? 'hr' as const : 'store_manager' as const;
+  const [boardFilter, setBoardFilter] = useState<{
+    storeId: string | null;
+    type: BoardFilterType;
+  }>({ storeId: null, type: null });
+
+  const approverRole = useMemo(() => {
+    if (currentRole === 'hr') return 'hr' as const;
+    if (currentRole === 'assistant_manager') return 'assistant_manager' as const;
+    return 'store_manager' as const;
+  }, [currentRole]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -135,7 +144,7 @@ export default function Approval() {
       if (status === 'pending_store') return '待店长初审，不可直接操作';
       if (status === 'approved' || status === 'rejected') return '该申请已完成审批';
     }
-    if (role === 'store_manager') {
+    if (role === 'store_manager' || role === 'assistant_manager') {
       if (status === 'pending_hr') return '待人事复核，不可再操作';
       if (status === 'approved' || status === 'rejected') return '该申请已完成审批';
     }
@@ -149,11 +158,18 @@ export default function Approval() {
     return hours >= 24;
   };
 
+  const isOverdue = (item: ApprovalItem): boolean => {
+    if (item.type === 'exception') return false;
+    if (item.status !== 'pending_store' && item.status !== 'pending_hr') return false;
+    const hours = differenceInHours(new Date(), parseISO(item.createdAt));
+    return hours >= 24;
+  };
+
   const stageOptions = useMemo(() => {
     const options: { key: StageFilter; label: string }[] = [
       { key: 'all', label: '全部环节' },
     ];
-    if (currentRole === 'store_manager' || currentRole === 'hr') {
+    if (currentRole === 'store_manager' || currentRole === 'assistant_manager' || currentRole === 'hr') {
       options.push({ key: 'pending_store', label: '待店长审批' });
     }
     if (currentRole === 'hr') {
@@ -161,6 +177,8 @@ export default function Approval() {
     }
     return options;
   }, [currentRole]);
+
+  const boardStats = useMemo<ApprovalBoardStat[]>(() => getApprovalBoardStats(), [getApprovalBoardStats, leaveRequests, swapRequests]);
 
   const buildApprovalList = useCallback((status: ApprovalTab): ApprovalItem[] => {
     const list: ApprovalItem[] = [];
@@ -170,10 +188,24 @@ export default function Approval() {
       return itemStoreId === storeFilter;
     };
 
-    const filterByStage = (itemStatus: ApprovalStatus): boolean => {
+    const filterByStage = (itemStatus: ApprovalStatus, item: ApprovalItem): boolean => {
       if (status !== 'pending') return true;
-      if (stageFilter === 'all') return true;
-      return itemStatus === stageFilter;
+      if (stageFilter !== 'all') {
+        return itemStatus === stageFilter;
+      }
+      if (boardFilter.type === 'pendingStore') {
+        return itemStatus === 'pending_store';
+      }
+      if (boardFilter.type === 'pendingHr') {
+        return itemStatus === 'pending_hr';
+      }
+      if (boardFilter.type === 'overdue') {
+        return isOverdue(item);
+      }
+      if (boardFilter.type === 'urged') {
+        return (item.reminderCount || 0) > 0;
+      }
+      return true;
     };
 
     let leaves = leaveRequests;
@@ -197,9 +229,8 @@ export default function Approval() {
     if (typeFilter === 'all' || typeFilter === 'leave') {
       leaves.forEach(r => {
         if (!filterByStore(r.storeId)) return;
-        if (!filterByStage(r.status)) return;
         const emp = employees.find(e => e.id === r.employeeId);
-        list.push({
+        const item: ApprovalItem = {
           id: `leave-${r.id}`,
           sourceId: r.id,
           type: 'leave',
@@ -214,18 +245,21 @@ export default function Approval() {
           managerComment: r.managerComment,
           hrComment: r.hrComment,
           reminderCount: r.reminderCount,
+          currentHandlerId: r.currentHandlerId,
+          currentHandlerName: r.currentHandlerName,
           handoffRecords: r.handoffRecords,
-        });
+        };
+        if (!filterByStage(r.status, item)) return;
+        list.push(item);
       });
     }
 
     if (typeFilter === 'all' || typeFilter === 'swap') {
       swaps.forEach(r => {
         if (!filterByStore(r.storeId)) return;
-        if (!filterByStage(r.status)) return;
         const emp = employees.find(e => e.id === r.applicantId);
         const target = employees.find(e => e.id === r.targetId);
-        list.push({
+        const item: ApprovalItem = {
           id: `swap-${r.id}`,
           sourceId: r.id,
           type: 'swap',
@@ -240,8 +274,12 @@ export default function Approval() {
           managerComment: r.managerComment,
           hrComment: r.hrComment,
           reminderCount: r.reminderCount,
+          currentHandlerId: r.currentHandlerId,
+          currentHandlerName: r.currentHandlerName,
           handoffRecords: r.handoffRecords,
-        });
+        };
+        if (!filterByStage(r.status, item)) return;
+        list.push(item);
       });
     }
 
@@ -251,9 +289,8 @@ export default function Approval() {
         const mappedStatus: ApprovalStatus =
           t.status === 'resolved' ? 'approved' :
           t.status === 'rejected' ? 'rejected' : 'pending_store';
-        if (!filterByStage(mappedStatus) && status === 'pending') return;
         const emp = employees.find(e => e.id === t.employeeId);
-        list.push({
+        const item: ApprovalItem = {
           id: `ticket-${t.id}`,
           sourceId: t.id,
           type: 'exception',
@@ -265,12 +302,14 @@ export default function Approval() {
           status: mappedStatus,
           createdAt: t.createdAt,
           detail: t.description,
-        });
+        };
+        if (!filterByStage(mappedStatus, item) && status === 'pending') return;
+        list.push(item);
       });
     }
 
     return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [leaveRequests, swapRequests, exceptionTickets, typeFilter, storeFilter, stageFilter]);
+  }, [leaveRequests, swapRequests, exceptionTickets, typeFilter, storeFilter, stageFilter, boardFilter]);
 
   const approvalList = buildApprovalList(activeTab);
 
@@ -280,13 +319,27 @@ export default function Approval() {
 
   const selectableItems = useMemo(() => {
     if (activeTab !== 'pending') return [];
-    return approvalList.filter(item => canApprove(item.status, approverRole));
+    return approvalList.filter(item => canApprove(item.status, approverRole, getRequestObject(item)));
   }, [approvalList, activeTab, approverRole, canApprove]);
 
   const allSelected = selectableItems.length > 0 && selectableItems.every(item => selectedIds.has(item.id));
   const someSelected = selectedIds.size > 0;
 
   const currentStore = stores.find(s => s.id === (storeFilter === 'all' ? currentStoreId : storeFilter));
+
+  const getRequestObject = (item: ApprovalItem) => {
+    if (item.type === 'leave') {
+      return leaveRequests.find(r => r.id === item.sourceId);
+    }
+    if (item.type === 'swap') {
+      return swapRequests.find(r => r.id === item.sourceId);
+    }
+    return undefined;
+  };
+
+  const isHandoffToAsm = (item: ApprovalItem): boolean => {
+    return !!(item.currentHandlerId && item.currentHandlerId !== 'store_manager' && item.currentHandlerId !== 'hr' && item.status === 'pending_store');
+  };
 
   const tabs = [
     { key: 'pending', label: '待审批', count: pendingList.length },
@@ -303,6 +356,12 @@ export default function Approval() {
 
   const selectedItem = approvalList.find(item => item.id === selectedId);
 
+  const assistantManagersForStore = useMemo((): AssistantManager[] => {
+    if (!handoffItem) return [];
+    const store = stores.find(s => s.id === handoffItem.storeId);
+    return store?.assistantManagers || [];
+  }, [handoffItem]);
+
   useEffect(() => {
     if (selectedId) {
       const found = approvalList.some(item => item.id === selectedId);
@@ -315,7 +374,26 @@ export default function Approval() {
 
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [activeTab, storeFilter, typeFilter, stageFilter]);
+  }, [activeTab, storeFilter, typeFilter, stageFilter, boardFilter]);
+
+  const handleBoardClick = (storeId: string, type: BoardFilterType) => {
+    setStoreFilter(storeId);
+    if (type === 'pendingStore') {
+      setStageFilter('pending_store');
+    } else if (type === 'pendingHr') {
+      setStageFilter('pending_hr');
+    } else {
+      setStageFilter('all');
+    }
+    setBoardFilter({ storeId, type });
+    setActiveTab('pending');
+  };
+
+  const handleClearBoardFilter = () => {
+    setBoardFilter({ storeId: null, type: null });
+    setStoreFilter('all');
+    setStageFilter('all');
+  };
 
   const handleToggleSelect = (itemId: string) => {
     setSelectedIds(prev => {
@@ -339,7 +417,7 @@ export default function Approval() {
 
   const handleApprove = () => {
     if (!selectedItem) return;
-    if (!canApprove(selectedItem.status, approverRole)) return;
+    if (!canApprove(selectedItem.status, approverRole, getRequestObject(selectedItem))) return;
     const ok = approveRequest(selectedItem.sourceId, selectedItem.type, approverRole);
     if (ok) {
       showToast(`${selectedItem.type === 'leave' ? '请假' : selectedItem.type === 'swap' ? '调班' : '异常'}申请已通过`);
@@ -350,8 +428,8 @@ export default function Approval() {
 
   const handleReject = () => {
     if (!selectedItem) return;
-    if (!canApprove(selectedItem.status, approverRole)) return;
-    const ok = rejectRequest(selectedItem.sourceId, selectedItem.type, approverRole, approvalComment || undefined);
+    if (!canApprove(selectedItem.status, approverRole, getRequestObject(selectedItem))) return;
+    const ok = rejectRequest(selectedItem.sourceId, selectedItem.type, approverRole, undefined, undefined, approvalComment || undefined);
     if (ok) {
       showToast(`${selectedItem.type === 'leave' ? '请假' : selectedItem.type === 'swap' ? '调班' : '异常'}申请已拒绝`);
       setSelectedId(null);
@@ -371,7 +449,7 @@ export default function Approval() {
     };
 
     selectedItems.forEach(item => {
-      if (canApprove(item.status, approverRole)) {
+      if (canApprove(item.status, approverRole, getRequestObject(item))) {
         itemsByType[item.type].push(item);
       }
     });
@@ -409,7 +487,7 @@ export default function Approval() {
 
   const handleConfirmHandoff = () => {
     if (!handoffItem || !handoffTargetId || !handoffReason.trim()) return;
-    const target = ASSISTANT_MANAGERS.find(a => a.id === handoffTargetId);
+    const target = assistantManagersForStore.find(a => a.id === handoffTargetId);
     if (!target) return;
     handoffRequest(
       handoffItem.sourceId,
@@ -496,7 +574,7 @@ export default function Approval() {
     } else if (item.status === 'pending_store') {
       timeline.push({
         label: '店长初审',
-        role: '门店店长',
+        role: item.currentHandlerName || '门店店长',
         done: false,
       });
     } else if (item.status === 'rejected') {
@@ -621,6 +699,93 @@ export default function Approval() {
     return null;
   };
 
+  const renderApprovalBoard = () => {
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Gauge size={20} className="text-cyan-500" />
+            <h2 className="text-lg font-semibold text-gray-800">审批处理时效看板</h2>
+          </div>
+          {boardFilter.storeId && (
+            <button
+              onClick={handleClearBoardFilter}
+              className="text-xs text-gray-500 hover:text-cyan-600 transition-colors flex items-center gap-1"
+            >
+              <X size={14} />
+              清除筛选
+            </button>
+          )}
+        </div>
+        <div className="space-y-2">
+          {boardStats.map(stat => (
+            <div
+              key={stat.storeId}
+              className={cn(
+                'flex items-center gap-4 p-3 rounded-lg transition-colors',
+                boardFilter.storeId === stat.storeId ? 'bg-cyan-50 border border-cyan-200' : 'bg-gray-50 hover:bg-gray-100'
+              )}
+            >
+              <div className="w-36 flex-shrink-0">
+                <span className="text-sm font-medium text-gray-800">{stat.storeName}</span>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap flex-1">
+                <button
+                  onClick={() => handleBoardClick(stat.storeId, 'pendingStore')}
+                  className={cn(
+                    'px-3 py-1 rounded-full text-xs font-medium transition-all flex items-center gap-1',
+                    boardFilter.storeId === stat.storeId && boardFilter.type === 'pendingStore'
+                      ? 'bg-amber-500 text-white shadow-sm'
+                      : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                  )}
+                >
+                  <Clock size={12} />
+                  待店长 {stat.pendingStore}
+                </button>
+                <button
+                  onClick={() => handleBoardClick(stat.storeId, 'pendingHr')}
+                  className={cn(
+                    'px-3 py-1 rounded-full text-xs font-medium transition-all flex items-center gap-1',
+                    boardFilter.storeId === stat.storeId && boardFilter.type === 'pendingHr'
+                      ? 'bg-cyan-500 text-white shadow-sm'
+                      : 'bg-cyan-100 text-cyan-700 hover:bg-cyan-200'
+                  )}
+                >
+                  <FileText size={12} />
+                  待人事 {stat.pendingHr}
+                </button>
+                <button
+                  onClick={() => handleBoardClick(stat.storeId, 'overdue')}
+                  className={cn(
+                    'px-3 py-1 rounded-full text-xs font-medium transition-all flex items-center gap-1',
+                    boardFilter.storeId === stat.storeId && boardFilter.type === 'overdue'
+                      ? 'bg-red-500 text-white shadow-sm'
+                      : 'bg-red-100 text-red-700 hover:bg-red-200'
+                  )}
+                >
+                  <AlertTriangle size={12} />
+                  已超时 {stat.overdue}
+                </button>
+                <button
+                  onClick={() => handleBoardClick(stat.storeId, 'urged')}
+                  className={cn(
+                    'px-3 py-1 rounded-full text-xs font-medium transition-all flex items-center gap-1',
+                    boardFilter.storeId === stat.storeId && boardFilter.type === 'urged'
+                      ? 'bg-orange-500 text-white shadow-sm'
+                      : 'bg-orange-100 text-orange-700 hover:bg-orange-200'
+                  )}
+                >
+                  <Bell size={12} />
+                  已催办 {stat.urged}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-6 relative">
       {toast && (
@@ -634,7 +799,7 @@ export default function Approval() {
         <div>
           <h1 className="text-2xl font-bold text-gray-800">审批中心</h1>
           <p className="text-gray-500 text-sm mt-1">
-            {currentStore?.name} · {currentRole === 'hr' ? '人事复核' : '店长初审'}
+            {currentStore?.name} · {currentRole === 'hr' ? '人事复核' : currentRole === 'assistant_manager' ? '副店长审批' : '店长初审'}
           </p>
         </div>
         {activeTab === 'pending' && someSelected && (
@@ -648,6 +813,10 @@ export default function Approval() {
         )}
       </div>
 
+      {renderApprovalBoard()}
+
+      <div className="h-px bg-gray-200" />
+
       <div className="grid grid-cols-4 gap-5">
         <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
           <div className="flex items-center gap-3">
@@ -657,7 +826,7 @@ export default function Approval() {
             <div>
               <p className="text-sm text-gray-500">待我审批</p>
               <p className="text-2xl font-bold text-amber-600">
-                {pendingList.filter(item => canApprove(item.status, approverRole)).length}
+                {pendingList.filter(item => canApprove(item.status, approverRole, getRequestObject(item))).length}
               </p>
             </div>
           </div>
@@ -745,7 +914,7 @@ export default function Approval() {
                 {storeDropdownOpen && (
                   <div className="absolute top-full left-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-10 max-h-60 overflow-y-auto">
                     <button
-                      onClick={() => { setStoreFilter('all'); setStoreDropdownOpen(false); }}
+                      onClick={() => { setStoreFilter('all'); setStoreDropdownOpen(false); setBoardFilter({ ...boardFilter, storeId: null }); }}
                       className={cn(
                         'w-full px-3 py-2 text-left text-sm hover:bg-gray-50 transition-colors',
                         storeFilter === 'all' && 'bg-cyan-50 text-cyan-600 font-medium'
@@ -756,7 +925,7 @@ export default function Approval() {
                     {stores.map(store => (
                       <button
                         key={store.id}
-                        onClick={() => { setStoreFilter(store.id); setStoreDropdownOpen(false); }}
+                        onClick={() => { setStoreFilter(store.id); setStoreDropdownOpen(false); setBoardFilter({ storeId: store.id, type: boardFilter.type }); }}
                         className={cn(
                           'w-full px-3 py-2 text-left text-sm hover:bg-gray-50 transition-colors',
                           storeFilter === store.id && 'bg-cyan-50 text-cyan-600 font-medium'
@@ -809,7 +978,7 @@ export default function Approval() {
                       {stageOptions.map(option => (
                         <button
                           key={option.key}
-                          onClick={() => { setStageFilter(option.key); setStageDropdownOpen(false); }}
+                          onClick={() => { setStageFilter(option.key); setStageDropdownOpen(false); if (option.key !== 'all') setBoardFilter({ ...boardFilter, type: null }); }}
                           className={cn(
                             'w-full px-3 py-2 text-left text-sm hover:bg-gray-50 transition-colors',
                             stageFilter === option.key && 'bg-cyan-50 text-cyan-600 font-medium'
@@ -846,12 +1015,17 @@ export default function Approval() {
 
           <div className="max-h-[600px] overflow-y-auto">
             {approvalList.map(item => {
-              const canHandle = canApprove(item.status, approverRole);
+              const reqObj = getRequestObject(item);
+              const canHandle = canApprove(item.status, approverRole, reqObj);
               const isSelected = selectedIds.has(item.id);
               const disabledReason = !canHandle ? getDisabledReason(item.status, currentRole) : '';
               const urgent = isUrgent(item);
               const showUrge = currentRole === 'hr' && urgent;
-              const showHandoff = currentRole === 'store_manager' && canHandle && item.type !== 'exception';
+              const handoffToAsm = isHandoffToAsm(item);
+              const showHandoff = currentRole === 'store_manager' && canHandle && item.type !== 'exception' && !handoffToAsm;
+              const showActionsForAsm = currentRole === 'assistant_manager' && canHandle;
+              const showActionsForStoreManager = currentRole === 'store_manager' && canHandle && !handoffToAsm;
+              const showActions = showActionsForAsm || showActionsForStoreManager;
 
               return (
                 <div
@@ -900,6 +1074,12 @@ export default function Approval() {
                         {currentRole === 'hr' && (
                           <span className="px-2 py-0.5 text-xs bg-gray-100 text-gray-500 rounded-full">
                             {getStoreLabel(item.storeId)}
+                          </span>
+                        )}
+                        {handoffToAsm && item.currentHandlerName && (
+                          <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-600 rounded-full font-medium flex items-center gap-1">
+                            <ArrowRightLeft size={10} />
+                            已转交{item.currentHandlerName}
                           </span>
                         )}
                         {item.reminderCount && item.reminderCount > 0 && (
@@ -968,8 +1148,15 @@ export default function Approval() {
         </div>
 
         {selectedItem && (() => {
-          const canHandleSelected = canApprove(selectedItem.status, approverRole);
+          const reqObj = getRequestObject(selectedItem);
+          const canHandleSelected = canApprove(selectedItem.status, approverRole, reqObj);
+          const handoffToAsm = isHandoffToAsm(selectedItem);
           const disabledReasonSelected = !canHandleSelected ? getDisabledReason(selectedItem.status, currentRole) : '';
+          const showActionsPanel = activeTab === 'pending' && (
+            (currentRole === 'store_manager' && canHandleSelected && !handoffToAsm) ||
+            (currentRole === 'assistant_manager' && canHandleSelected) ||
+            (currentRole === 'hr' && canHandleSelected)
+          );
 
           return (
             <div className="w-96 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -1014,6 +1201,15 @@ export default function Approval() {
                       {getStatusLabel(selectedItem.status)}
                     </span>
                   </div>
+                  {selectedItem.currentHandlerName && selectedItem.status !== 'approved' && selectedItem.status !== 'rejected' && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-500">当前处理人</span>
+                      <span className="px-2.5 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-600 flex items-center gap-1">
+                        <User size={12} />
+                        {selectedItem.currentHandlerName}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="pt-3 border-t border-gray-100">
@@ -1037,6 +1233,28 @@ export default function Approval() {
                   <div className="pt-3 border-t border-gray-100">
                     <p className="text-sm font-medium text-gray-800 mb-2">人事意见</p>
                     <p className="text-sm text-gray-600 bg-violet-50 p-3 rounded-lg">{selectedItem.hrComment}</p>
+                  </div>
+                )}
+
+                {selectedItem.handoffRecords && selectedItem.handoffRecords.length > 0 && (
+                  <div className="pt-3 border-t border-gray-100">
+                    <p className="text-sm font-medium text-gray-800 mb-3 flex items-center gap-2">
+                      <ArrowRightLeft size={14} className="text-purple-500" />
+                      转交流转记录
+                    </p>
+                    <div className="space-y-3">
+                      {selectedItem.handoffRecords.map((record, idx) => (
+                        <div key={record.id} className="bg-purple-50 rounded-lg p-3">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-sm font-medium text-gray-800">{record.fromHandlerName}</span>
+                            <ArrowRightLeft size={12} className="text-purple-500" />
+                            <span className="text-sm font-medium text-gray-800">{record.toHandlerName}</span>
+                          </div>
+                          <p className="text-xs text-gray-500 mb-1">转交原因：{record.reason}</p>
+                          <p className="text-xs text-gray-400">{record.createdAt}</p>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
 
@@ -1068,7 +1286,7 @@ export default function Approval() {
                 </div>
               </div>
 
-              {activeTab === 'pending' && (
+              {showActionsPanel && (
                 <div className="p-5 border-t border-gray-100 space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">审批意见</label>
@@ -1162,42 +1380,46 @@ export default function Approval() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   转交对象 <span className="text-red-500">*</span>
                 </label>
-                <div className="space-y-2">
-                  {ASSISTANT_MANAGERS.map(am => (
-                    <label
-                      key={am.id}
-                      className={cn(
-                        'flex items-center gap-3 p-3 rounded-lg border-2 cursor-pointer transition-all',
-                        handoffTargetId === am.id
-                          ? 'border-purple-500 bg-purple-50'
-                          : 'border-gray-200 hover:border-gray-300'
-                      )}
-                    >
-                      <input
-                        type="radio"
-                        name="handoffTarget"
-                        value={am.id}
-                        checked={handoffTargetId === am.id}
-                        onChange={() => setHandoffTargetId(am.id)}
-                        className="sr-only"
-                      />
-                      <div className={cn(
-                        'w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0',
-                        handoffTargetId === am.id
-                          ? 'border-purple-500'
-                          : 'border-gray-300'
-                      )}>
-                        {handoffTargetId === am.id && (
-                          <div className="w-2.5 h-2.5 rounded-full bg-purple-500" />
+                {assistantManagersForStore.length === 0 ? (
+                  <p className="text-sm text-gray-400 bg-gray-50 p-3 rounded-lg">该门店暂无副店长</p>
+                ) : (
+                  <div className="space-y-2">
+                    {assistantManagersForStore.map(am => (
+                      <label
+                        key={am.id}
+                        className={cn(
+                          'flex items-center gap-3 p-3 rounded-lg border-2 cursor-pointer transition-all',
+                          handoffTargetId === am.id
+                            ? 'border-purple-500 bg-purple-50'
+                            : 'border-gray-200 hover:border-gray-300'
                         )}
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-gray-800">{am.name}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">同店副店长</p>
-                      </div>
-                    </label>
-                  ))}
-                </div>
+                      >
+                        <input
+                          type="radio"
+                          name="handoffTarget"
+                          value={am.id}
+                          checked={handoffTargetId === am.id}
+                          onChange={() => setHandoffTargetId(am.id)}
+                          className="sr-only"
+                        />
+                        <div className={cn(
+                          'w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0',
+                          handoffTargetId === am.id
+                            ? 'border-purple-500'
+                            : 'border-gray-300'
+                        )}>
+                          {handoffTargetId === am.id && (
+                            <div className="w-2.5 h-2.5 rounded-full bg-purple-500" />
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium text-gray-800">{am.name}</p>
+                          <p className="text-xs text-gray-500 mt-0.5">同店副店长</p>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
