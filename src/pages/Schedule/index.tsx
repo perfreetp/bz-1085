@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
-import { getEmployeesByStore } from '@/data/employees';
+import { getEmployeesByStore, getEmployeeById } from '@/data/employees';
 import { shiftTemplates } from '@/data/shiftTemplates';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, addMonths, subMonths, isSameMonth, isToday, startOfWeek, addDays, subWeeks } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -23,7 +23,7 @@ import type { ShiftType } from '@/types';
 type ViewMode = 'month' | 'week';
 
 export default function Schedule() {
-  const { currentStoreId, schedules, upsertSchedule, copyWeekSchedules } = useBusinessStore();
+  const { currentStoreId, currentRole, schedules, upsertSchedule, copyWeekSchedules } = useBusinessStore();
   const [viewMode, setViewMode] = useState<ViewMode>('week');
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedShift, setSelectedShift] = useState<ShiftType | null>(null);
@@ -102,6 +102,12 @@ export default function Schedule() {
     });
     return map;
   }, [schedules]);
+
+  const getSwapWithName = (swapWithEmployeeId?: string): string => {
+    if (!swapWithEmployeeId) return '';
+    const emp = getEmployeeById(swapWithEmployeeId);
+    return emp?.name || '';
+  };
 
   const shiftStats = useMemo(() => {
     const startStr = format(days[0], 'yyyy-MM-dd');
@@ -252,6 +258,22 @@ export default function Schedule() {
               <div className="mt-6 pt-4 border-t border-gray-200">
                 <p className="text-xs text-gray-400 mb-2">提示：选择班次后点击日历格子进行排班</p>
               </div>
+
+              <div className="mt-4 pt-4 border-t border-gray-200">
+                <p className="text-xs font-medium text-gray-600 mb-2">图例说明</p>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded border-2 border-dashed border-purple-400 flex items-center justify-center">
+                      <span className="text-[10px] text-purple-600 font-bold">调</span>
+                    </div>
+                    <span className="text-xs text-gray-500">调班生成</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded ring-2 ring-amber-400 ring-offset-1 bg-amber-50"></div>
+                    <span className="text-xs text-gray-500">跨店支援</span>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -304,6 +326,7 @@ export default function Schedule() {
                         const dateStr = format(day, 'yyyy-MM-dd');
                         const sched = empMap[dateStr];
                         const isCurrentMonth = isSameMonth(day, currentDate);
+                        const swapWithName = getSwapWithName(sched?.swapWithEmployeeId);
                         
                         return (
                           <td 
@@ -315,21 +338,35 @@ export default function Schedule() {
                             )}
                           >
                             {sched ? (
-                              <div
-                                onClick={() => handleShiftClick(emp.id, dateStr)}
-                                className={cn(
-                                  'cursor-pointer rounded-md px-2 py-1.5 text-xs font-medium border transition-all hover:shadow-sm',
-                                  getShiftColor(sched.shiftType),
-                                  sched.isSupport && 'ring-2 ring-amber-400 ring-offset-1'
-                                )}
-                              >
-                                <div>{getShiftLabel(sched.shiftType)}</div>
-                                <div className="text-[10px] opacity-70 mt-0.5">
-                                  {sched.startTime.slice(0, 5)}
+                              <div className="relative group">
+                                <div
+                                  onClick={() => handleShiftClick(emp.id, dateStr)}
+                                  className={cn(
+                                    'cursor-pointer rounded-md px-2 py-1.5 text-xs font-medium border transition-all hover:shadow-sm relative',
+                                    getShiftColor(sched.shiftType),
+                                    sched.isSupport && 'ring-2 ring-amber-400 ring-offset-1',
+                                    sched.isSwapGenerated && 'border-2 border-dashed border-purple-400'
+                                  )}
+                                >
+                                  {sched.isSwapGenerated && (
+                                    <div className="absolute -top-1.5 -right-1.5 bg-purple-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full leading-none z-10">
+                                      调
+                                    </div>
+                                  )}
+                                  <div>{getShiftLabel(sched.shiftType)}</div>
+                                  <div className="text-[10px] opacity-70 mt-0.5">
+                                    {sched.startTime.slice(0, 5)}
+                                  </div>
+                                  {sched.isSupport && (
+                                    <div className="text-[10px] text-amber-600 mt-0.5">
+                                      支援
+                                    </div>
+                                  )}
                                 </div>
-                                {sched.isSupport && (
-                                  <div className="text-[10px] text-amber-600 mt-0.5">
-                                    支援
+                                {sched.isSwapGenerated && swapWithName && (
+                                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-20 shadow-lg">
+                                    与 {swapWithName} 调班
+                                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                                   </div>
                                 )}
                               </div>

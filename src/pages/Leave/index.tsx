@@ -5,23 +5,34 @@ import {
   Plus,
   CheckCircle,
   RefreshCw,
-  ChevronRight
+  ChevronRight,
+  X,
+  User,
+  Clock,
+  MessageSquare,
+  CheckCircle2,
+  XCircle
 } from 'lucide-react';
 import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
 import { leaveTypeLabels } from '@/data/leaves';
 import { getEmployeesByStore, employees } from '@/data/employees';
+import { shiftTemplates } from '@/data/shiftTemplates';
 import { format } from 'date-fns';
-import { cn, getStatusColor, getStatusLabel, getShiftLabel } from '@/utils';
-import type { LeaveType, ShiftType } from '@/types';
+import { cn, getStatusColor, getStatusLabel, getShiftLabel, getLeaveTypeLabel } from '@/utils';
+import type { LeaveType, ShiftType, LeaveRequest, SwapRequest } from '@/types';
 
 type TabType = 'leave' | 'swap' | 'quota';
+type DetailType = 'leave' | 'swap' | null;
 
 export default function Leave() {
-  const { currentStoreId, currentRole, leaveRequests, swapRequests, addLeaveRequest, addSwapRequest } = useBusinessStore();
+  const { currentStoreId, leaveRequests, swapRequests, approvalRecords, addLeaveRequest, addSwapRequest } = useBusinessStore();
   const [activeTab, setActiveTab] = useState<TabType>('leave');
   const [showLeaveModal, setShowLeaveModal] = useState(false);
   const [showSwapModal, setShowSwapModal] = useState(false);
+  const [detailType, setDetailType] = useState<DetailType>(null);
+  const [selectedLeave, setSelectedLeave] = useState<LeaveRequest | null>(null);
+  const [selectedSwap, setSelectedSwap] = useState<SwapRequest | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [leaveForm, setLeaveForm] = useState({
     leaveType: 'annual' as LeaveType,
@@ -97,11 +108,338 @@ export default function Leave() {
     showToast('调班申请已提交，等待审批');
   };
 
+  const handleViewLeaveDetail = (leave: LeaveRequest) => {
+    setSelectedLeave(leave);
+    setDetailType('leave');
+  };
+
+  const handleViewSwapDetail = (swap: SwapRequest) => {
+    setSelectedSwap(swap);
+    setDetailType('swap');
+  };
+
+  const closeDetail = () => {
+    setDetailType(null);
+    setSelectedLeave(null);
+    setSelectedSwap(null);
+  };
+
+  const getApprovalRecords = (sourceId: string, sourceType: 'leave' | 'swap') => {
+    return approvalRecords
+      .filter(r => r.sourceId === sourceId && r.sourceType === sourceType)
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  };
+
+  const getApproverRoleLabel = (role: string) => {
+    return role === 'store_manager' ? '店长' : '人事管理员';
+  };
+
   const tabs = [
     { key: 'leave', label: '请假申请', icon: FileText },
     { key: 'swap', label: '调班申请', icon: RefreshCw },
     { key: 'quota', label: '假期额度', icon: ClockIcon },
   ];
+
+  const renderDetailContent = () => {
+    if (detailType === 'leave' && selectedLeave) {
+      const emp = employees.find(e => e.id === selectedLeave.employeeId);
+      const records = getApprovalRecords(selectedLeave.id, 'leave');
+      
+      return (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-gray-800">请假申请详情</h3>
+            <span className={cn('inline-flex px-3 py-1 text-xs font-medium rounded-full', getStatusColor(selectedLeave.status))}>
+              {getStatusLabel(selectedLeave.status)}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">申请人</p>
+              <div className="flex items-center gap-2">
+                <img src={emp?.avatar} alt={emp?.name} className="w-8 h-8 rounded-full object-cover" />
+                <div>
+                  <p className="text-sm font-medium text-gray-800">{emp?.name}</p>
+                  <p className="text-xs text-gray-400">{emp?.position}</p>
+                </div>
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">请假类型</p>
+              <p className="text-sm font-medium text-gray-800">{getLeaveTypeLabel(selectedLeave.leaveType)}</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">开始日期</p>
+              <p className="text-sm font-medium text-gray-800">{selectedLeave.startDate}</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">结束日期</p>
+              <p className="text-sm font-medium text-gray-800">{selectedLeave.endDate}</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">请假天数</p>
+              <p className="text-sm font-medium text-gray-800">{selectedLeave.days} 天</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">提交时间</p>
+              <p className="text-sm font-medium text-gray-800">{selectedLeave.createdAt}</p>
+            </div>
+          </div>
+
+          <div className="bg-gray-50 rounded-lg p-4">
+            <p className="text-xs text-gray-500 mb-2">请假原因</p>
+            <p className="text-sm text-gray-700">{selectedLeave.reason}</p>
+          </div>
+
+          <div>
+            <h4 className="text-sm font-semibold text-gray-800 mb-4 flex items-center gap-2">
+              <Clock size={16} className="text-cyan-500" />
+              审批流程
+            </h4>
+            <div className="relative">
+              <div className="absolute left-3.5 top-2 bottom-2 w-0.5 bg-gray-200"></div>
+              <div className="space-y-4">
+                <div className="flex gap-3 relative">
+                  <div className="w-7 h-7 rounded-full bg-cyan-100 flex items-center justify-center z-10 flex-shrink-0">
+                    <User size={14} className="text-cyan-600" />
+                  </div>
+                  <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium text-gray-800">提交申请</span>
+                      <span className="text-xs text-gray-400">{selectedLeave.createdAt}</span>
+                    </div>
+                    <p className="text-xs text-gray-500">员工提交请假申请</p>
+                  </div>
+                </div>
+
+                {records.length === 0 ? (
+                  <div className="flex gap-3 relative">
+                    <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center z-10 flex-shrink-0">
+                      <Clock size={14} className="text-amber-600" />
+                    </div>
+                    <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-800">等待审批</span>
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        {selectedLeave.status === 'pending_store' ? '等待店长审批' : 
+                         selectedLeave.status === 'pending_hr' ? '等待人事复核' : '审批流程已结束'}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  records.map((record, index) => (
+                    <div key={record.id} className="flex gap-3 relative">
+                      <div className={cn('w-7 h-7 rounded-full flex items-center justify-center z-10 flex-shrink-0',
+                        record.result === 'rejected' ? 'bg-red-100' : 'bg-green-100'
+                      )}>
+                        {record.result === 'rejected' ? (
+                          <XCircle size={14} className="text-red-600" />
+                        ) : (
+                          <CheckCircle2 size={14} className="text-green-600" />
+                        )}
+                      </div>
+                      <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-800">
+                            {getApproverRoleLabel(record.approverRole)}审批
+                          </span>
+                          <span className="text-xs text-gray-400">{record.createdAt}</span>
+                        </div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={cn('inline-flex px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor(record.result))}>
+                            {record.result === 'rejected' ? '已拒绝' : 
+                             record.result === 'approved' ? '已通过' : '待处理'}
+                          </span>
+                        </div>
+                        {record.comment && (
+                          <div className="flex items-start gap-1.5 mt-2">
+                            <MessageSquare size={12} className="text-gray-400 mt-0.5 flex-shrink-0" />
+                            <p className="text-xs text-gray-600">{record.comment}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+
+                {records.length > 0 && selectedLeave.status !== 'approved' && selectedLeave.status !== 'rejected' && (
+                  <div className="flex gap-3 relative">
+                    <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center z-10 flex-shrink-0">
+                      <Clock size={14} className="text-amber-600" />
+                    </div>
+                    <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-800">等待下一环节</span>
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        {selectedLeave.status === 'pending_store' ? '等待店长审批' : '等待人事复核'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (detailType === 'swap' && selectedSwap) {
+      const applicant = employees.find(e => e.id === selectedSwap.applicantId);
+      const target = employees.find(e => e.id === selectedSwap.targetId);
+      const records = getApprovalRecords(selectedSwap.id, 'swap');
+      
+      return (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-gray-800">调班申请详情</h3>
+            <span className={cn('inline-flex px-3 py-1 text-xs font-medium rounded-full', getStatusColor(selectedSwap.status))}>
+              {getStatusLabel(selectedSwap.status)}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">申请人</p>
+              <div className="flex items-center gap-2">
+                <img src={applicant?.avatar} alt={applicant?.name} className="w-8 h-8 rounded-full object-cover" />
+                <div>
+                  <p className="text-sm font-medium text-gray-800">{applicant?.name}</p>
+                  <p className="text-xs text-gray-400">{applicant?.position}</p>
+                </div>
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">调换人</p>
+              <div className="flex items-center gap-2">
+                <img src={target?.avatar} alt={target?.name} className="w-8 h-8 rounded-full object-cover" />
+                <div>
+                  <p className="text-sm font-medium text-gray-800">{target?.name}</p>
+                  <p className="text-xs text-gray-400">{target?.position}</p>
+                </div>
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">申请人日期</p>
+              <p className="text-sm font-medium text-gray-800">{selectedSwap.applicantDate}</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">调换人日期</p>
+              <p className="text-sm font-medium text-gray-800">{selectedSwap.targetDate}</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">申请人班次</p>
+              <p className="text-sm font-medium text-gray-800">{getShiftLabel(selectedSwap.applicantShift)}</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-4">
+              <p className="text-xs text-gray-500 mb-1">调换人班次</p>
+              <p className="text-sm font-medium text-gray-800">{getShiftLabel(selectedSwap.targetShift)}</p>
+            </div>
+          </div>
+
+          <div className="bg-gray-50 rounded-lg p-4">
+            <p className="text-xs text-gray-500 mb-2">调班原因</p>
+            <p className="text-sm text-gray-700">{selectedSwap.reason}</p>
+          </div>
+
+          <div>
+            <h4 className="text-sm font-semibold text-gray-800 mb-4 flex items-center gap-2">
+              <Clock size={16} className="text-violet-500" />
+              审批流程
+            </h4>
+            <div className="relative">
+              <div className="absolute left-3.5 top-2 bottom-2 w-0.5 bg-gray-200"></div>
+              <div className="space-y-4">
+                <div className="flex gap-3 relative">
+                  <div className="w-7 h-7 rounded-full bg-violet-100 flex items-center justify-center z-10 flex-shrink-0">
+                    <User size={14} className="text-violet-600" />
+                  </div>
+                  <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium text-gray-800">提交申请</span>
+                      <span className="text-xs text-gray-400">{selectedSwap.createdAt}</span>
+                    </div>
+                    <p className="text-xs text-gray-500">员工提交调班申请</p>
+                  </div>
+                </div>
+
+                {records.length === 0 ? (
+                  <div className="flex gap-3 relative">
+                    <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center z-10 flex-shrink-0">
+                      <Clock size={14} className="text-amber-600" />
+                    </div>
+                    <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-800">等待审批</span>
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        {selectedSwap.status === 'pending_store' ? '等待店长审批' : 
+                         selectedSwap.status === 'pending_hr' ? '等待人事复核' : '审批流程已结束'}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  records.map((record) => (
+                    <div key={record.id} className="flex gap-3 relative">
+                      <div className={cn('w-7 h-7 rounded-full flex items-center justify-center z-10 flex-shrink-0',
+                        record.result === 'rejected' ? 'bg-red-100' : 'bg-green-100'
+                      )}>
+                        {record.result === 'rejected' ? (
+                          <XCircle size={14} className="text-red-600" />
+                        ) : (
+                          <CheckCircle2 size={14} className="text-green-600" />
+                        )}
+                      </div>
+                      <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-800">
+                            {getApproverRoleLabel(record.approverRole)}审批
+                          </span>
+                          <span className="text-xs text-gray-400">{record.createdAt}</span>
+                        </div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={cn('inline-flex px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor(record.result))}>
+                            {record.result === 'rejected' ? '已拒绝' : 
+                             record.result === 'approved' ? '已通过' : '待处理'}
+                          </span>
+                        </div>
+                        {record.comment && (
+                          <div className="flex items-start gap-1.5 mt-2">
+                            <MessageSquare size={12} className="text-gray-400 mt-0.5 flex-shrink-0" />
+                            <p className="text-xs text-gray-600">{record.comment}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+
+                {records.length > 0 && selectedSwap.status !== 'approved' && selectedSwap.status !== 'rejected' && (
+                  <div className="flex gap-3 relative">
+                    <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center z-10 flex-shrink-0">
+                      <Clock size={14} className="text-amber-600" />
+                    </div>
+                    <div className="flex-1 bg-gray-50 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-800">等待下一环节</span>
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        {selectedSwap.status === 'pending_store' ? '等待店长审批' : '等待人事复核'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return null;
+  };
 
   return (
     <div className="space-y-6 relative">
@@ -203,7 +541,10 @@ export default function Leave() {
                         </span>
                       </td>
                       <td className="py-3 px-4">
-                        <button className="text-sm text-cyan-600 hover:text-cyan-700 flex items-center gap-1">
+                        <button 
+                          onClick={() => handleViewLeaveDetail(request)}
+                          className="text-sm text-cyan-600 hover:text-cyan-700 flex items-center gap-1"
+                        >
                           详情 <ChevronRight size={14} />
                         </button>
                       </td>
@@ -259,7 +600,10 @@ export default function Leave() {
                         </span>
                       </td>
                       <td className="py-3 px-4">
-                        <button className="text-sm text-cyan-600 hover:text-cyan-700 flex items-center gap-1">
+                        <button 
+                          onClick={() => handleViewSwapDetail(request)}
+                          className="text-sm text-cyan-600 hover:text-cyan-700 flex items-center gap-1"
+                        >
                           详情 <ChevronRight size={14} />
                         </button>
                       </td>
@@ -405,6 +749,22 @@ export default function Leave() {
             <div className="p-6 border-t border-gray-100 flex gap-3">
               <button onClick={() => setShowSwapModal(false)} className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors">取消</button>
               <button onClick={handleSubmitSwap} className="flex-1 py-2.5 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow">提交申请</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {detailType && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={closeDetail}>
+          <div className="bg-white rounded-2xl w-[560px] max-h-[85vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-white p-4 border-b border-gray-100 flex items-center justify-between z-10">
+              <div></div>
+              <button onClick={closeDetail} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors">
+                <X size={18} className="text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6">
+              {renderDetailContent()}
             </div>
           </div>
         </div>

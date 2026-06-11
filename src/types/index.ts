@@ -6,7 +6,7 @@ export type ExceptionType = 'late' | 'early_leave' | 'absent' | 'distance' | 'ph
 
 export type LeaveType = 'annual' | 'sick' | 'personal' | 'compensation' | 'maternity' | 'other';
 
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+export type ApprovalStatus = 'pending_store' | 'pending_hr' | 'approved' | 'rejected';
 
 export type TicketStatus = 'pending' | 'processing' | 'resolved' | 'rejected';
 
@@ -53,6 +53,9 @@ export interface Schedule {
   isSupport: boolean;
   supportStoreId?: string;
   note?: string;
+  isSwapGenerated?: boolean;
+  swapRequestId?: string;
+  swapWithEmployeeId?: string;
 }
 
 export interface CheckinRecord {
@@ -170,4 +173,27 @@ export interface ShiftTemplate {
   startTime: string;
   endTime: string;
   color: string;
+}
+
+export interface BonusImpactItem {
+  id: string;
+  type: 'absent' | 'late' | 'early_leave' | 'leave' | 'exception';
+  date: string;
+  description: string;
+  impactAmount: number;
+  sourceId: string;
+}
+
+export interface MonthAuditDetail {
+  employeeId: string;
+  employeeName: string;
+  storeId: string;
+  year: number;
+  month: number;
+  totalBonus: number;
+  totalFine: number;
+  impactItems: BonusImpactItem[];
+  approvedLeaves: LeaveRequest[];
+  resolvedExceptions: ExceptionTicket[];
+  absentRecords: CheckinRecord[];
 }

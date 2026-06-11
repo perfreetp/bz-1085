@@ -12,7 +12,8 @@ import { format, subWeeks, startOfWeek, addDays } from 'date-fns';
 import type {
   UserRole, Schedule, ShiftType, CheckinRecord, ExceptionTicket,
   LeaveRequest, LeaveType, SwapRequest, ApprovalRecord,
-  AttendanceSummary, BlacklistRule, TicketStatus
+  AttendanceSummary, BlacklistRule, TicketStatus,
+  ApprovalStatus, MonthAuditDetail, BonusImpactItem
 } from '@/types';
 
 function loadFromStorage<T>(key: string, fallback: T): T {
@@ -27,6 +28,20 @@ function saveToStorage<T>(key: string, data: T) {
   try {
     localStorage.setItem(key, JSON.stringify(data));
   } catch {}
+}
+
+function migrateLeavesStatus(arr: LeaveRequest[]): LeaveRequest[] {
+  return arr.map(l => {
+    if ((l.status as string) === 'pending') return { ...l, status: 'pending_store' as const };
+    return l;
+  });
+}
+
+function migrateSwapsStatus(arr: SwapRequest[]): SwapRequest[] {
+  return arr.map(s => {
+    if ((s.status as string) === 'pending') return { ...s, status: 'pending_store' as const };
+    return s;
+  });
 }
 
 interface BusinessState {
@@ -45,7 +60,7 @@ interface BusinessState {
   setCurrentStoreId: (id: string) => void;
   setCurrentRole: (role: UserRole) => void;
 
-  upsertSchedule: (employeeId: string, storeId: string, date: string, shiftType: ShiftType) => void;
+  upsertSchedule: (employeeId: string, storeId: string, date: string, shiftType: ShiftType, meta?: { isSwapGenerated?: boolean; swapRequestId?: string; swapWithEmployeeId?: string }) => void;
   copyWeekSchedules: (storeId: string, fromWeekStart: string, toWeekStart: string) => void;
 
   addLeaveRequest: (data: { employeeId: string; storeId: string; leaveType: LeaveType; startDate: string; endDate: string; days: number; reason: string }) => void;
@@ -53,6 +68,7 @@ interface BusinessState {
 
   approveRequest: (sourceId: string, sourceType: 'leave' | 'swap' | 'exception', approverRole: 'store_manager' | 'hr') => void;
   rejectRequest: (sourceId: string, sourceType: 'leave' | 'swap' | 'exception', approverRole: 'store_manager' | 'hr', comment?: string) => void;
+  batchApproveRequests: (sourceIds: string[], sourceType: 'leave' | 'swap' | 'exception', approverRole: 'store_manager' | 'hr') => number;
 
   registerAbsent: (employeeId: string, storeId: string, date: string, reason: string) => void;
   createExceptionTicket: (data: { employeeId: string; storeId: string; type: ExceptionTicket['type']; date: string; description: string; priority: ExceptionTicket['priority'] }) => void;
@@ -62,19 +78,28 @@ interface BusinessState {
   lockMonth: (storeId: string, year: number, month: number) => void;
   isMonthLocked: (storeId: string, year: number, month: number) => boolean;
   adjustBonus: (summaryId: string, bonus: number, fine: number) => void;
+  recalculateSummaries: (storeId: string, year: number, month: number) => void;
+  getMonthAuditDetail: (storeId: string, year: number, month: number) => MonthAuditDetail[];
+
   toggleBlacklistRule: (ruleId: string) => void;
 }
 
 export const useBusinessStore = create<BusinessState>((set, get) => {
-  const persistedSchedules = loadFromStorage<Schedule[]>('att_schedules', initialSchedules);
-  const persistedCheckins = loadFromStorage<CheckinRecord[]>('att_checkins', initialCheckins);
-  const persistedTickets = loadFromStorage<ExceptionTicket[]>('att_tickets', initialTickets);
-  const persistedLeaves = loadFromStorage<LeaveRequest[]>('att_leaves', initialLeaves);
-  const persistedSwaps = loadFromStorage<SwapRequest[]>('att_swaps', initialSwaps);
+  const rawSchedules = loadFromStorage<Schedule[]>('att_schedules', initialSchedules);
+  const rawCheckins = loadFromStorage<CheckinRecord[]>('att_checkins', initialCheckins);
+  const rawTickets = loadFromStorage<ExceptionTicket[]>('att_tickets', initialTickets);
+  const rawLeaves = loadFromStorage<LeaveRequest[]>('att_leaves', initialLeaves);
+  const rawSwaps = loadFromStorage<SwapRequest[]>('att_swaps', initialSwaps);
   const persistedApprovals = loadFromStorage<ApprovalRecord[]>('att_approvals', []);
   const persistedSummaries = loadFromStorage<AttendanceSummary[]>('att_summaries', initialSummaries);
   const persistedRules = loadFromStorage<BlacklistRule[]>('att_rules', initialRules);
   const persistedLocked = loadFromStorage<string[]>('att_locked', []);
+
+  const persistedSchedules = rawSchedules;
+  const persistedCheckins = rawCheckins;
+  const persistedTickets = rawTickets;
+  const persistedLeaves = migrateLeavesStatus(rawLeaves);
+  const persistedSwaps = migrateSwapsStatus(rawSwaps);
 
   const persist = () => {
     const s = get();
@@ -87,6 +112,92 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
     saveToStorage('att_summaries', s.summaries);
     saveToStorage('att_rules', s.blacklistRules);
     saveToStorage('att_locked', s.lockedMonths);
+  };
+
+  const addApprovalRecord = (
+    sourceId: string,
+    sourceType: 'leave' | 'swap' | 'exception',
+    approverRole: 'store_manager' | 'hr',
+    result: ApprovalStatus,
+    comment: string,
+    approvals: ApprovalRecord[]
+  ) => {
+    const approverName = approverRole === 'store_manager' ? '店长' : '人事管理员';
+    approvals.push({
+      id: `approval-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      sourceId,
+      sourceType,
+      approverId: approverRole,
+      approverName,
+      approverRole,
+      result,
+      comment,
+      createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
+    });
+  };
+
+  const applySwapToSchedules = (swap: SwapRequest, schedules: Schedule[]): Schedule[] => {
+    let next = [...schedules];
+    const { applicantId, targetId, storeId, applicantDate, targetDate, applicantShift, targetShift } = swap;
+    const tplA = shiftTemplates.find(t => t.type === applicantShift);
+    const tplT = shiftTemplates.find(t => t.type === targetShift);
+
+    const applicantIdx = next.findIndex(s => s.employeeId === applicantId && s.date === applicantDate);
+    const targetIdx = next.findIndex(s => s.employeeId === targetId && s.date === targetDate);
+
+    if (applicantIdx >= 0) {
+      next[applicantIdx] = {
+        ...next[applicantIdx],
+        shiftType: targetShift,
+        startTime: tplT?.startTime || '--',
+        endTime: tplT?.endTime || '--',
+        isSwapGenerated: true,
+        swapRequestId: swap.id,
+        swapWithEmployeeId: targetId,
+      };
+    } else {
+      next.push({
+        id: `sched-${storeId}-${applicantDate}-${applicantId}`,
+        employeeId: applicantId,
+        storeId,
+        date: applicantDate,
+        shiftType: targetShift,
+        startTime: tplT?.startTime || '--',
+        endTime: tplT?.endTime || '--',
+        isSupport: false,
+        isSwapGenerated: true,
+        swapRequestId: swap.id,
+        swapWithEmployeeId: targetId,
+      });
+    }
+
+    if (targetIdx >= 0) {
+      next[targetIdx] = {
+        ...next[targetIdx],
+        shiftType: applicantShift,
+        startTime: tplA?.startTime || '--',
+        endTime: tplA?.endTime || '--',
+        isSwapGenerated: true,
+        swapRequestId: swap.id,
+        swapWithEmployeeId: applicantId,
+      };
+    } else {
+      next.push({
+        id: `sched-${storeId}-${targetDate}-${targetId}`,
+        employeeId: targetId,
+        storeId,
+        date: targetDate,
+        shiftType: applicantShift,
+        startTime: tplA?.startTime || '--',
+        endTime: tplA?.endTime || '--',
+        isSupport: false,
+        isSwapGenerated: true,
+        swapRequestId: swap.id,
+        swapWithEmployeeId: applicantId,
+      });
+    }
+
+    return next;
   };
 
   return {
@@ -105,7 +216,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
     setCurrentStoreId: (id) => set({ currentStoreId: id }),
     setCurrentRole: (role) => set({ currentRole: role }),
 
-    upsertSchedule: (employeeId, storeId, date, shiftType) => {
+    upsertSchedule: (employeeId, storeId, date, shiftType, meta) => {
       set(state => {
         const tpl = shiftTemplates.find(t => t.type === shiftType);
         const existing = state.schedules.find(
@@ -115,7 +226,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         if (existing) {
           next = state.schedules.map(s =>
             s.id === existing.id
-              ? { ...s, shiftType, startTime: tpl?.startTime || '--', endTime: tpl?.endTime || '--' }
+              ? { ...s, shiftType, startTime: tpl?.startTime || '--', endTime: tpl?.endTime || '--', ...meta }
               : s
           );
         } else {
@@ -128,6 +239,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
             startTime: tpl?.startTime || '--',
             endTime: tpl?.endTime || '--',
             isSupport: false,
+            ...meta,
           };
           next = [...state.schedules, newSched];
         }
@@ -174,7 +286,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
       const newLeave: LeaveRequest = {
         id: `leave-${Date.now()}`,
         ...data,
-        status: 'pending',
+        status: 'pending_store',
         createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
       };
       set(state => ({ leaveRequests: [...state.leaveRequests, newLeave] }));
@@ -185,7 +297,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
       const newSwap: SwapRequest = {
         id: `swap-${Date.now()}`,
         ...data,
-        status: 'pending',
+        status: 'pending_store',
         createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
       };
       set(state => ({ swapRequests: [...state.swapRequests, newSwap] }));
@@ -197,6 +309,7 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         let nextLeaves = [...state.leaveRequests];
         let nextSwaps = [...state.swapRequests];
         let nextTickets = [...state.exceptionTickets];
+        let nextSchedules = [...state.schedules];
         const nextApprovals = [...state.approvalRecords];
 
         const approverName = approverRole === 'store_manager' ? '店长' : '人事管理员';
@@ -206,34 +319,46 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
           if (!leave) return state;
 
           if (approverRole === 'store_manager') {
-            nextLeaves = nextLeaves.map(l =>
-              l.id === sourceId ? { ...l, status: 'approved' as const, managerComment: '店长初审通过' } : l
-            );
-            const relatedSwaps = nextSwaps.filter(s => s.status === 'pending');
-            if (leave.status === 'pending') {
-              // pending -> store_manager approved, still needs hr
+            if (leave.status === 'pending_store') {
               nextLeaves = nextLeaves.map(l =>
-                l.id === sourceId ? { ...l, status: 'pending' as const, managerComment: '店长初审通过' } : l
+                l.id === sourceId ? { ...l, status: 'pending_hr' as const, managerComment: '店长初审通过' } : l
               );
+              addApprovalRecord(sourceId, 'leave', 'store_manager', 'pending_hr', '店长初审通过', nextApprovals);
             }
           }
           if (approverRole === 'hr') {
-            nextLeaves = nextLeaves.map(l =>
-              l.id === sourceId ? { ...l, status: 'approved' as const, hrComment: '人事复核通过' } : l
-            );
+            if (leave.status === 'pending_hr' || leave.status === 'pending_store') {
+              nextLeaves = nextLeaves.map(l =>
+                l.id === sourceId ? { ...l, status: 'approved' as const, hrComment: '人事复核通过' } : l
+              );
+              addApprovalRecord(sourceId, 'leave', 'hr', 'approved', '人事复核通过', nextApprovals);
+            }
           }
         }
 
         if (sourceType === 'swap') {
+          const swap = nextSwaps.find(s => s.id === sourceId);
+          if (!swap) return state;
+
           if (approverRole === 'store_manager') {
-            nextSwaps = nextSwaps.map(s =>
-              s.id === sourceId ? { ...s, status: 'approved' as const, managerComment: '店长初审通过' } : s
-            );
+            if (swap.status === 'pending_store') {
+              nextSwaps = nextSwaps.map(s =>
+                s.id === sourceId ? { ...s, status: 'pending_hr' as const, managerComment: '店长初审通过' } : s
+              );
+              addApprovalRecord(sourceId, 'swap', 'store_manager', 'pending_hr', '店长初审通过', nextApprovals);
+            }
           }
           if (approverRole === 'hr') {
-            nextSwaps = nextSwaps.map(s =>
-              s.id === sourceId ? { ...s, status: 'approved' as const, hrComment: '人事复核通过' } : s
-            );
+            if (swap.status === 'pending_hr' || swap.status === 'pending_store') {
+              nextSwaps = nextSwaps.map(s =>
+                s.id === sourceId ? { ...s, status: 'approved' as const, hrComment: '人事复核通过' } : s
+              );
+              addApprovalRecord(sourceId, 'swap', 'hr', 'approved', '人事复核通过', nextApprovals);
+              const approvedSwap = nextSwaps.find(s => s.id === sourceId);
+              if (approvedSwap) {
+                nextSchedules = applySwapToSchedules(approvedSwap, nextSchedules);
+              }
+            }
           }
         }
 
@@ -241,24 +366,14 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
           nextTickets = nextTickets.map(t =>
             t.id === sourceId ? { ...t, status: 'resolved' as const, handler: approverName } : t
           );
+          addApprovalRecord(sourceId, 'exception', approverRole, 'approved', '异常工单处理通过', nextApprovals);
         }
-
-        nextApprovals.push({
-          id: `approval-${Date.now()}`,
-          sourceId,
-          sourceType,
-          approverId: approverRole,
-          approverName,
-          approverRole,
-          result: 'approved',
-          comment: `${approverName}审批通过`,
-          createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
-        });
 
         return {
           leaveRequests: nextLeaves,
           swapRequests: nextSwaps,
           exceptionTickets: nextTickets,
+          schedules: nextSchedules,
           approvalRecords: nextApprovals,
         };
       });
@@ -276,40 +391,55 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         const rejectComment = comment || `${approverName}审批拒绝`;
 
         if (sourceType === 'leave') {
-          nextLeaves = nextLeaves.map(l =>
-            l.id === sourceId ? {
-              ...l,
-              status: 'rejected' as const,
-              ...(approverRole === 'store_manager' ? { managerComment: rejectComment } : { hrComment: rejectComment }),
-            } : l
-          );
+          const leave = nextLeaves.find(l => l.id === sourceId);
+          if (!leave) return state;
+
+          if (approverRole === 'store_manager') {
+            if (leave.status === 'pending_store') {
+              nextLeaves = nextLeaves.map(l =>
+                l.id === sourceId ? { ...l, status: 'rejected' as const, managerComment: rejectComment } : l
+              );
+              addApprovalRecord(sourceId, 'leave', 'store_manager', 'rejected', rejectComment, nextApprovals);
+            }
+          }
+          if (approverRole === 'hr') {
+            if (leave.status === 'pending_hr' || leave.status === 'pending_store') {
+              nextLeaves = nextLeaves.map(l =>
+                l.id === sourceId ? { ...l, status: 'rejected' as const, hrComment: rejectComment } : l
+              );
+              addApprovalRecord(sourceId, 'leave', 'hr', 'rejected', rejectComment, nextApprovals);
+            }
+          }
         }
+
         if (sourceType === 'swap') {
-          nextSwaps = nextSwaps.map(s =>
-            s.id === sourceId ? {
-              ...s,
-              status: 'rejected' as const,
-              ...(approverRole === 'store_manager' ? { managerComment: rejectComment } : { hrComment: rejectComment }),
-            } : s
-          );
+          const swap = nextSwaps.find(s => s.id === sourceId);
+          if (!swap) return state;
+
+          if (approverRole === 'store_manager') {
+            if (swap.status === 'pending_store') {
+              nextSwaps = nextSwaps.map(s =>
+                s.id === sourceId ? { ...s, status: 'rejected' as const, managerComment: rejectComment } : s
+              );
+              addApprovalRecord(sourceId, 'swap', 'store_manager', 'rejected', rejectComment, nextApprovals);
+            }
+          }
+          if (approverRole === 'hr') {
+            if (swap.status === 'pending_hr' || swap.status === 'pending_store') {
+              nextSwaps = nextSwaps.map(s =>
+                s.id === sourceId ? { ...s, status: 'rejected' as const, hrComment: rejectComment } : s
+              );
+              addApprovalRecord(sourceId, 'swap', 'hr', 'rejected', rejectComment, nextApprovals);
+            }
+          }
         }
+
         if (sourceType === 'exception') {
           nextTickets = nextTickets.map(t =>
             t.id === sourceId ? { ...t, status: 'rejected' as const, handler: approverName } : t
           );
+          addApprovalRecord(sourceId, 'exception', approverRole, 'rejected', rejectComment, nextApprovals);
         }
-
-        nextApprovals.push({
-          id: `approval-${Date.now()}`,
-          sourceId,
-          sourceType,
-          approverId: approverRole,
-          approverName,
-          approverRole,
-          result: 'rejected',
-          comment: rejectComment,
-          createdAt: format(new Date(), 'yyyy-MM-dd HH:mm:ss'),
-        });
 
         return {
           leaveRequests: nextLeaves,
@@ -319,6 +449,16 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         };
       });
       persist();
+    },
+
+    batchApproveRequests: (sourceIds, sourceType, approverRole) => {
+      const { approveRequest } = get();
+      let count = 0;
+      sourceIds.forEach(id => {
+        approveRequest(id, sourceType, approverRole);
+        count++;
+      });
+      return count;
     },
 
     registerAbsent: (employeeId, storeId, date, reason) => {
@@ -405,6 +545,135 @@ export const useBusinessStore = create<BusinessState>((set, get) => {
         ),
       }));
       persist();
+    },
+
+    recalculateSummaries: (storeId, year, month) => {
+      if (get().isMonthLocked(storeId, year, month)) return;
+
+      set(state => {
+        const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+        const monthEnd = `${year}-${String(month).padStart(2, '0')}-31`;
+
+        const storeEmployees = employees.filter(e => e.storeId === storeId);
+        const nextSummaries = [...state.summaries];
+
+        storeEmployees.forEach(emp => {
+          const empRecords = state.checkinRecords.filter(
+            r => r.employeeId === emp.id && r.date >= monthStart && r.date <= monthEnd
+          );
+          const empLeaves = state.leaveRequests.filter(
+            l => l.employeeId === emp.id && l.status === 'approved' && l.startDate >= monthStart && l.startDate <= monthEnd
+          );
+          const empTickets = state.exceptionTickets.filter(
+            t => t.employeeId === emp.id && t.date >= monthStart && t.date <= monthEnd && t.status === 'resolved'
+          );
+
+          const lateCount = empRecords.filter(r => r.status === 'late').length;
+          const earlyLeaveCount = empRecords.filter(r => r.status === 'early_leave').length;
+          const absentCount = empRecords.filter(r => r.status === 'absent').length;
+          const leaveDays = empLeaves.reduce((sum, l) => sum + l.days, 0);
+          const actualDays = empRecords.filter(r => r.status === 'normal' || r.status === 'late' || r.status === 'early_leave').length;
+
+          const fine = absentCount * 100 + lateCount * 20 + earlyLeaveCount * 20;
+          const bonus = 0;
+
+          const existingIdx = nextSummaries.findIndex(
+            s => s.employeeId === emp.id && s.year === year && s.month === month
+          );
+          if (existingIdx >= 0) {
+            nextSummaries[existingIdx] = {
+              ...nextSummaries[existingIdx],
+              lateCount,
+              earlyLeaveCount,
+              absentCount,
+              leaveDays,
+              actualDays,
+              fine,
+              bonus,
+            };
+          }
+        });
+
+        return { summaries: nextSummaries };
+      });
+      persist();
+    },
+
+    getMonthAuditDetail: (storeId, year, month) => {
+      const state = get();
+      const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+      const monthEnd = `${year}-${String(month).padStart(2, '0')}-31`;
+
+      const storeEmployees = employees.filter(e => e.storeId === storeId);
+      const details: MonthAuditDetail[] = [];
+
+      storeEmployees.forEach(emp => {
+        const empRecords = state.checkinRecords.filter(
+          r => r.employeeId === emp.id && r.date >= monthStart && r.date <= monthEnd
+        );
+        const empLeaves = state.leaveRequests.filter(
+          l => l.employeeId === emp.id && l.status === 'approved' && l.startDate >= monthStart && l.startDate <= monthEnd
+        );
+        const empTickets = state.exceptionTickets.filter(
+          t => t.employeeId === emp.id && t.date >= monthStart && t.date <= monthEnd && t.status !== 'rejected'
+        );
+        const absentRecords = empRecords.filter(r => r.status === 'absent');
+
+        const impactItems: BonusImpactItem[] = [];
+
+        absentRecords.forEach(r => {
+          impactItems.push({
+            id: `impact-absent-${r.id}`,
+            type: 'absent',
+            date: r.date,
+            description: '缺勤',
+            impactAmount: -100,
+            sourceId: r.id,
+          });
+        });
+
+        empRecords.filter(r => r.status === 'late').forEach(r => {
+          impactItems.push({
+            id: `impact-late-${r.id}`,
+            type: 'late',
+            date: r.date,
+            description: '迟到',
+            impactAmount: -20,
+            sourceId: r.id,
+          });
+        });
+
+        empRecords.filter(r => r.status === 'early_leave').forEach(r => {
+          impactItems.push({
+            id: `impact-early-${r.id}`,
+            type: 'early_leave',
+            date: r.date,
+            description: '早退',
+            impactAmount: -20,
+            sourceId: r.id,
+          });
+        });
+
+        const summary = state.summaries.find(
+          s => s.employeeId === emp.id && s.year === year && s.month === month
+        );
+
+        details.push({
+          employeeId: emp.id,
+          employeeName: emp.name,
+          storeId,
+          year,
+          month,
+          totalBonus: summary?.bonus || 0,
+          totalFine: summary?.fine || 0,
+          impactItems,
+          approvedLeaves: empLeaves,
+          resolvedExceptions: empTickets,
+          absentRecords,
+        });
+      });
+
+      return details;
     },
 
     toggleBlacklistRule: (ruleId) => {

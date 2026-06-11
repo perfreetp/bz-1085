@@ -3,7 +3,7 @@ import { employees } from './employees';
 import { format, addDays, subDays } from 'date-fns';
 
 const leaveTypes = ['annual', 'sick', 'personal', 'compensation', 'maternity', 'other'] as const;
-const statuses = ['pending', 'approved', 'rejected'] as const;
+const statuses = ['pending_store', 'pending_hr', 'approved', 'rejected'] as const;
 
 const leaveTypeLabels: Record<string, string> = {
   annual: '年假',
@@ -26,7 +26,7 @@ function generateLeaveRequests(storeId: string): LeaveRequest[] {
     const days = Math.floor(Math.random() * 5) + 1;
     const startDate = addDays(subDays(new Date(), Math.floor(Math.random() * 30)), i % 10);
     const endDate = addDays(startDate, days - 1);
-    const status = statuses[i % 3];
+    const status = statuses[i % 4];
 
     requests.push({
       id: `leave-${storeId}-${i + 1}`,
@@ -39,8 +39,8 @@ function generateLeaveRequests(storeId: string): LeaveRequest[] {
       reason: leaveType === 'sick' ? '身体不适，需要休息' : leaveType === 'annual' ? '外出旅游休假' : '处理个人事务',
       status,
       createdAt: format(subDays(startDate, 2), 'yyyy-MM-dd HH:mm:ss'),
-      managerComment: status !== 'pending' ? (status === 'approved' ? '同意，工作已安排交接' : '近期人手紧张，建议调整时间') : undefined,
-      hrComment: status !== 'pending' ? (status === 'approved' ? '已审核通过，将从年假中扣除' : '未通过，请重新申请') : undefined,
+      managerComment: status !== 'pending_store' ? (status === 'rejected' ? '近期人手紧张，建议调整时间' : '同意，工作已安排交接') : undefined,
+      hrComment: status === 'approved' ? '已审核通过，将从假期中扣除' : (status === 'rejected' ? '未通过，请重新申请' : undefined),
     });
   }
 

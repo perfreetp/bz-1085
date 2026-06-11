@@ -18,7 +18,9 @@ import {
   ToggleRight,
   CheckCircle,
   X,
-  Search
+  Search,
+  Eye,
+  RefreshCw
 } from 'lucide-react';
 import {
   BarChart,
@@ -39,7 +41,8 @@ import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
 import { getEmployeesByStore, employees } from '@/data/employees';
 import { format } from 'date-fns';
-import { cn } from '@/utils';
+import { cn, getStatusColor, getStatusLabel, getLeaveTypeLabel } from '@/utils';
+import type { MonthAuditDetail } from '@/types';
 
 type SummaryTab = 'ranking' | 'calculation' | 'lock' | 'certificate' | 'blacklist';
 
@@ -49,10 +52,13 @@ export default function Summary() {
     summaries,
     blacklistRules,
     lockedMonths,
+    currentRole,
     lockMonth,
     isMonthLocked,
     adjustBonus,
-    toggleBlacklistRule
+    toggleBlacklistRule,
+    recalculateSummaries,
+    getMonthAuditDetail
   } = useBusinessStore();
 
   const [activeTab, setActiveTab] = useState<SummaryTab>('ranking');
@@ -60,9 +66,12 @@ export default function Summary() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [toast, setToast] = useState<string | null>(null);
   const [searchName, setSearchName] = useState('');
+  const [bonusSearchName, setBonusSearchName] = useState('');
   const [adjustModal, setAdjustModal] = useState<{ summaryId: string; empName: string; bonus: number; fine: number } | null>(null);
   const [adjustBonusVal, setAdjustBonusVal] = useState(0);
   const [adjustFineVal, setAdjustFineVal] = useState(0);
+  const [auditModal, setAuditModal] = useState<MonthAuditDetail | null>(null);
+  const [isRecalculating, setIsRecalculating] = useState(false);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -77,6 +86,14 @@ export default function Summary() {
     summaries.filter(s => s.storeId === currentStoreId && s.month === selectedMonth),
     [summaries, currentStoreId, selectedMonth]
   );
+
+  const filteredStoreSummaries = useMemo(() => {
+    if (!bonusSearchName.trim()) return storeSummaries;
+    return storeSummaries.filter(s => {
+      const emp = employees.find(e => e.id === s.employeeId);
+      return emp?.name.includes(bonusSearchName.trim());
+    });
+  }, [storeSummaries, bonusSearchName]);
 
   const rankings = useMemo(() => {
     const list = stores.map(store => {
@@ -140,6 +157,16 @@ export default function Summary() {
     showToast(`${selectedMonth}月考勤数据已锁定`);
   };
 
+  const handleRecalculate = () => {
+    if (monthLocked) return;
+    setIsRecalculating(true);
+    setTimeout(() => {
+      recalculateSummaries(currentStoreId, currentYear, selectedMonth);
+      setIsRecalculating(false);
+      showToast(`${selectedMonth}月奖扣数据已重新计算`);
+    }, 500);
+  };
+
   const handleGenerateCertificate = (empId: string) => {
     const emp = employees.find(e => e.id === empId);
     const summary = storeSummaries.find(s => s.employeeId === empId);
@@ -200,6 +227,29 @@ export default function Summary() {
     showToast(`已调整 ${adjustModal.empName} 的奖扣明细`);
     setAdjustModal(null);
   };
+
+  const handleOpenAudit = (employeeId: string) => {
+    const auditDetails = getMonthAuditDetail(currentStoreId, currentYear, selectedMonth);
+    const detail = auditDetails.find(d => d.employeeId === employeeId);
+    if (detail) {
+      setAuditModal(detail);
+    }
+  };
+
+  const sortedImpactItems = useMemo(() => {
+    if (!auditModal) return [];
+    return [...auditModal.impactItems].sort((a, b) => a.date.localeCompare(b.date));
+  }, [auditModal]);
+
+  const sortedLeaves = useMemo(() => {
+    if (!auditModal) return [];
+    return [...auditModal.approvedLeaves].sort((a, b) => a.startDate.localeCompare(b.startDate));
+  }, [auditModal]);
+
+  const sortedExceptions = useMemo(() => {
+    if (!auditModal) return [];
+    return [...auditModal.resolvedExceptions].sort((a, b) => a.date.localeCompare(b.date));
+  }, [auditModal]);
 
   const filteredEmployees = useMemo(() => {
     const emps = getEmployeesByStore(currentStoreId);
@@ -263,6 +313,203 @@ export default function Summary() {
               >
                 确认调整
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {auditModal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">
+                  奖扣反查明细 — {auditModal.employeeName}
+                </h3>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  {currentYear}年{selectedMonth}月
+                </p>
+              </div>
+              <button onClick={() => setAuditModal(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-6">
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+                  <AlertTriangle size={16} className="text-red-500" />
+                  缺勤记录
+                  <span className="text-xs text-gray-400 font-normal">（每条扣款 -¥100）</span>
+                </h4>
+                {auditModal.absentRecords.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-4 bg-gray-50 rounded-lg">
+                    本月无缺勤记录
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {auditModal.absentRecords.map(record => (
+                      <div
+                        key={record.id}
+                        className="flex items-center justify-between px-4 py-3 bg-red-50 rounded-lg"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={cn('px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor('absent'))}>
+                            {getStatusLabel('absent')}
+                          </span>
+                          <span className="text-sm text-gray-700">{record.date}</span>
+                        </div>
+                        <span className="text-sm font-medium text-red-600">-¥100</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+                  <AlertTriangle size={16} className="text-amber-500" />
+                  迟到记录
+                  <span className="text-xs text-gray-400 font-normal">（每条扣款 -¥20）</span>
+                </h4>
+                {sortedImpactItems.filter(i => i.type === 'late').length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-4 bg-gray-50 rounded-lg">
+                    本月无迟到记录
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {sortedImpactItems.filter(i => i.type === 'late').map(item => (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between px-4 py-3 bg-amber-50 rounded-lg"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={cn('px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor('late'))}>
+                            {getStatusLabel('late')}
+                          </span>
+                          <span className="text-sm text-gray-700">{item.date}</span>
+                        </div>
+                        <span className="text-sm font-medium text-amber-600">-¥20</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+                  <AlertTriangle size={16} className="text-orange-500" />
+                  早退记录
+                  <span className="text-xs text-gray-400 font-normal">（每条扣款 -¥20）</span>
+                </h4>
+                {sortedImpactItems.filter(i => i.type === 'early_leave').length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-4 bg-gray-50 rounded-lg">
+                    本月无早退记录
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {sortedImpactItems.filter(i => i.type === 'early_leave').map(item => (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between px-4 py-3 bg-orange-50 rounded-lg"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={cn('px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor('early_leave'))}>
+                            {getStatusLabel('early_leave')}
+                          </span>
+                          <span className="text-sm text-gray-700">{item.date}</span>
+                        </div>
+                        <span className="text-sm font-medium text-orange-600">-¥20</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+                  <Calendar size={16} className="text-violet-500" />
+                  已审批请假
+                </h4>
+                {sortedLeaves.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-4 bg-gray-50 rounded-lg">
+                    本月无已审批请假
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {sortedLeaves.map(leave => (
+                      <div
+                        key={leave.id}
+                        className="flex items-center justify-between px-4 py-3 bg-violet-50 rounded-lg"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className="px-2 py-0.5 text-xs font-medium bg-violet-100 text-violet-700 rounded-full">
+                            {getLeaveTypeLabel(leave.leaveType)}
+                          </span>
+                          <span className="text-sm text-gray-700">
+                            {leave.startDate} 至 {leave.endDate}
+                          </span>
+                        </div>
+                        <span className="text-sm text-gray-600">{leave.days}天</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+                  <Settings size={16} className="text-cyan-500" />
+                  已处理异常工单
+                </h4>
+                {sortedExceptions.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-4 bg-gray-50 rounded-lg">
+                    本月无已处理异常工单
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {sortedExceptions.map(ticket => (
+                      <div
+                        key={ticket.id}
+                        className="flex items-center justify-between px-4 py-3 bg-cyan-50 rounded-lg"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={cn('px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor(ticket.status))}>
+                            {getStatusLabel(ticket.status)}
+                          </span>
+                          <div>
+                            <p className="text-sm text-gray-700">{ticket.date}</p>
+                            <p className="text-xs text-gray-400">{ticket.description}</p>
+                          </div>
+                        </div>
+                        <span className="text-xs text-gray-500">{ticket.handler || '已处理'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="border-t border-gray-100 p-5 bg-gray-50">
+              <div className="grid grid-cols-3 gap-4">
+                <div className="text-center">
+                  <p className="text-xs text-gray-500 mb-1">总奖金</p>
+                  <p className="text-xl font-bold text-emerald-600">+¥{auditModal.totalBonus}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-gray-500 mb-1">总罚款</p>
+                  <p className="text-xl font-bold text-red-600">-¥{auditModal.totalFine}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-gray-500 mb-1">实发奖扣</p>
+                  <p className={cn(
+                    'text-xl font-bold',
+                    auditModal.totalBonus - auditModal.totalFine >= 0 ? 'text-emerald-600' : 'text-red-600'
+                  )}>
+                    {auditModal.totalBonus - auditModal.totalFine >= 0 ? '+' : ''}¥{auditModal.totalBonus - auditModal.totalFine}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -521,7 +768,17 @@ export default function Summary() {
                     已锁账
                   </span>
                 )}
-                <button className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors">
+                <button
+                  onClick={handleRecalculate}
+                  disabled={monthLocked || isRecalculating}
+                  className={cn(
+                    'px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5',
+                    monthLocked || isRecalculating
+                      ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  )}
+                >
+                  <RefreshCw size={14} className={isRecalculating ? 'animate-spin' : ''} />
                   重新计算
                 </button>
                 <button className="px-3 py-1.5 text-sm bg-cyan-500 text-white rounded-lg hover:bg-cyan-600 transition-colors">
@@ -529,6 +786,20 @@ export default function Summary() {
                 </button>
               </div>
             </div>
+
+            <div className="mb-4">
+              <div className="relative">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="搜索员工姓名..."
+                  value={bonusSearchName}
+                  onChange={e => setBonusSearchName(e.target.value)}
+                  className="w-64 h-9 pl-9 pr-4 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead className="bg-gray-50">
@@ -546,7 +817,7 @@ export default function Summary() {
                   </tr>
                 </thead>
                 <tbody>
-                  {storeSummaries.slice(0, 10).map(summary => {
+                  {filteredStoreSummaries.map(summary => {
                     const emp = employees.find(e => e.id === summary.employeeId);
                     return (
                       <tr key={summary.id} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
@@ -571,21 +842,37 @@ export default function Summary() {
                         <td className="py-3 px-4 text-center text-sm text-violet-600">{summary.leaveDays}天</td>
                         <td className="py-3 px-4 text-center text-sm font-medium text-emerald-600">+¥{summary.bonus}</td>
                         <td className="py-3 px-4 text-center text-sm font-medium text-red-600">-¥{summary.fine}</td>
-                        <td className="py-3 px-4 text-center">
-                          {monthLocked ? (
-                            <span className="text-sm text-gray-300 cursor-not-allowed">调整</span>
-                          ) : (
+                        <td className="py-3 px-4">
+                          <div className="flex items-center justify-center gap-2">
                             <button
-                              onClick={() => handleOpenAdjust(summary.id)}
-                              className="text-sm text-cyan-600 hover:text-cyan-700"
+                              onClick={() => handleOpenAudit(summary.employeeId)}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-cyan-600 bg-cyan-50 rounded hover:bg-cyan-100 transition-colors"
                             >
-                              调整
+                              <Eye size={12} />
+                              反查
                             </button>
-                          )}
+                            {monthLocked ? (
+                              <span className="text-xs text-gray-300 cursor-not-allowed">调整</span>
+                            ) : (
+                              <button
+                                onClick={() => handleOpenAdjust(summary.id)}
+                                className="text-xs text-cyan-600 hover:text-cyan-700"
+                              >
+                                调整
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
                   })}
+                  {filteredStoreSummaries.length === 0 && (
+                    <tr>
+                      <td colSpan={10} className="py-10 text-center text-sm text-gray-400">
+                        暂无匹配的员工数据
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

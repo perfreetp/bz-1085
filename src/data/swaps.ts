@@ -2,7 +2,7 @@ import { SwapRequest } from '@/types';
 import { employees } from './employees';
 import { format, addDays } from 'date-fns';
 
-const statuses = ['pending', 'approved', 'rejected'] as const;
+const statuses = ['pending_store', 'pending_hr', 'approved', 'rejected'] as const;
 const shiftTypes = ['morning', 'middle', 'evening'] as const;
 
 function generateSwapRequests(storeId: string): SwapRequest[] {
@@ -14,7 +14,7 @@ function generateSwapRequests(storeId: string): SwapRequest[] {
     const target = storeEmployees[(i + 3) % storeEmployees.length];
     const applicantDate = addDays(new Date(), i + 1);
     const targetDate = addDays(new Date(), i + 2);
-    const status = statuses[i % 3];
+    const status = statuses[i % 4];
 
     requests.push({
       id: `swap-${storeId}-${i + 1}`,
@@ -28,8 +28,8 @@ function generateSwapRequests(storeId: string): SwapRequest[] {
       reason: '个人事务需要调换班次，已与对方协商一致',
       status,
       createdAt: format(addDays(applicantDate, -3), 'yyyy-MM-dd HH:mm:ss'),
-      managerComment: status !== 'pending' ? (status === 'approved' ? '同意，已确认双方协商一致' : '当日排班紧张，无法调换') : undefined,
-      hrComment: status !== 'pending' ? (status === 'approved' ? '复核通过' : '不同意，请重新安排') : undefined,
+      managerComment: status !== 'pending_store' ? (status === 'rejected' ? '当日排班紧张，无法调换' : '同意，已确认双方协商一致') : undefined,
+      hrComment: status === 'approved' ? '复核通过' : (status === 'rejected' ? '不同意，请重新安排' : undefined),
     });
   }
 

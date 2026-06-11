@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   CheckSquare,
   CheckCircle,
@@ -9,7 +9,12 @@ import {
   AlertTriangle,
   ChevronRight,
   MessageSquare,
-  User
+  User,
+  Store as StoreIcon,
+  Filter,
+  ChevronDown,
+  Square,
+  CheckSquare as CheckSquareFilled
 } from 'lucide-react';
 import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
@@ -17,15 +22,17 @@ import { employees } from '@/data/employees';
 import { leaveTypeLabels } from '@/data/leaves';
 import { exceptionTypeLabels } from '@/data/exceptions';
 import { cn, getStatusColor, getStatusLabel, getShiftLabel } from '@/utils';
-import type { ApprovalStatus } from '@/types';
+import type { ApprovalStatus, UserRole } from '@/types';
 
 type ApprovalTab = 'pending' | 'approved' | 'rejected';
 type ApprovalType = 'all' | 'leave' | 'swap' | 'exception';
+type StageFilter = 'all' | 'pending_store' | 'pending_hr';
 
 interface ApprovalItem {
   id: string;
   sourceId: string;
   type: 'leave' | 'swap' | 'exception';
+  storeId: string;
   title: string;
   subtitle: string;
   applicant: string;
@@ -47,15 +54,20 @@ export default function Approval() {
     approvalRecords,
     approveRequest,
     rejectRequest,
+    batchApproveRequests,
   } = useBusinessStore();
 
   const [activeTab, setActiveTab] = useState<ApprovalTab>('pending');
+  const [storeFilter, setStoreFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<ApprovalType>('all');
+  const [stageFilter, setStageFilter] = useState<StageFilter>('all');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [approvalComment, setApprovalComment] = useState('');
   const [toast, setToast] = useState<string | null>(null);
+  const [storeDropdownOpen, setStoreDropdownOpen] = useState(false);
+  const [stageDropdownOpen, setStageDropdownOpen] = useState(false);
 
-  const currentStore = stores.find(s => s.id === currentStoreId);
   const approverRole = currentRole === 'hr' ? 'hr' as const : 'store_manager' as const;
 
   const showToast = useCallback((msg: string) => {
@@ -63,61 +75,71 @@ export default function Approval() {
     setTimeout(() => setToast(null), 2500);
   }, []);
 
-  const pendingLeaves = leaveRequests.filter(r => r.storeId === currentStoreId && r.status === 'pending');
-  const pendingSwaps = swapRequests.filter(r => r.storeId === currentStoreId && r.status === 'pending');
-  const pendingTickets = exceptionTickets.filter(t => t.storeId === currentStoreId && (t.status === 'pending' || t.status === 'processing'));
-
-  const approvedLeaves = leaveRequests.filter(r => r.storeId === currentStoreId && r.status === 'approved');
-  const approvedSwaps = swapRequests.filter(r => r.storeId === currentStoreId && r.status === 'approved');
-  const resolvedTickets = exceptionTickets.filter(t => t.storeId === currentStoreId && t.status === 'resolved');
-
-  const rejectedLeaves = leaveRequests.filter(r => r.storeId === currentStoreId && r.status === 'rejected');
-  const rejectedSwaps = swapRequests.filter(r => r.storeId === currentStoreId && r.status === 'rejected');
-  const rejectedTickets = exceptionTickets.filter(t => t.storeId === currentStoreId && t.status === 'rejected');
-
-  useEffect(() => {
-    if (selectedId) {
-      const leaves = activeTab === 'pending' ? pendingLeaves : activeTab === 'approved' ? approvedLeaves : rejectedLeaves;
-      const swaps = activeTab === 'pending' ? pendingSwaps : activeTab === 'approved' ? approvedSwaps : rejectedSwaps;
-      const tickets = activeTab === 'pending' ? pendingTickets : activeTab === 'approved' ? resolvedTickets : rejectedTickets;
-      let found = false;
-      if (typeFilter === 'all' || typeFilter === 'leave') found = leaves.some(r => `leave-${r.id}` === selectedId);
-      if (!found && (typeFilter === 'all' || typeFilter === 'swap')) found = swaps.some(r => `swap-${r.id}` === selectedId);
-      if (!found && (typeFilter === 'all' || typeFilter === 'exception')) found = tickets.some(t => `ticket-${t.id}` === selectedId);
-      if (!found) {
-        setSelectedId(null);
-        setApprovalComment('');
-      }
+  const canHandleStatus = (status: ApprovalStatus, role: UserRole): boolean => {
+    if (role === 'store_manager') {
+      return status === 'pending_store';
     }
-  }, [leaveRequests, swapRequests, exceptionTickets, activeTab, selectedId]);
+    if (role === 'hr') {
+      return status === 'pending_store' || status === 'pending_hr';
+    }
+    return false;
+  };
 
-  const buildApprovalList = (status: ApprovalTab): ApprovalItem[] => {
+  const stageOptions = useMemo(() => {
+    const options: { key: StageFilter; label: string }[] = [
+      { key: 'all', label: '全部环节' },
+    ];
+    if (currentRole === 'store_manager' || currentRole === 'hr') {
+      options.push({ key: 'pending_store', label: '待店长审批' });
+    }
+    if (currentRole === 'hr') {
+      options.push({ key: 'pending_hr', label: '待人事复核' });
+    }
+    return options;
+  }, [currentRole]);
+
+  const buildApprovalList = useCallback((status: ApprovalTab): ApprovalItem[] => {
     const list: ApprovalItem[] = [];
-    let leaves: typeof leaveRequests;
-    let swaps: typeof swapRequests;
-    let tickets: typeof exceptionTickets;
+
+    const filterByStore = (itemStoreId: string): boolean => {
+      if (storeFilter === 'all') return true;
+      return itemStoreId === storeFilter;
+    };
+
+    const filterByStage = (itemStatus: ApprovalStatus): boolean => {
+      if (status !== 'pending') return true;
+      if (stageFilter === 'all') return true;
+      return itemStatus === stageFilter;
+    };
+
+    let leaves = leaveRequests;
+    let swaps = swapRequests;
+    let tickets = exceptionTickets;
 
     if (status === 'pending') {
-      leaves = pendingLeaves;
-      swaps = pendingSwaps;
-      tickets = pendingTickets;
+      leaves = leaveRequests.filter(r => r.status === 'pending_store' || r.status === 'pending_hr');
+      swaps = swapRequests.filter(r => r.status === 'pending_store' || r.status === 'pending_hr');
+      tickets = exceptionTickets.filter(t => t.status === 'pending' || t.status === 'processing');
     } else if (status === 'approved') {
-      leaves = approvedLeaves;
-      swaps = approvedSwaps;
-      tickets = resolvedTickets;
+      leaves = leaveRequests.filter(r => r.status === 'approved');
+      swaps = swapRequests.filter(r => r.status === 'approved');
+      tickets = exceptionTickets.filter(t => t.status === 'resolved');
     } else {
-      leaves = rejectedLeaves;
-      swaps = rejectedSwaps;
-      tickets = rejectedTickets;
+      leaves = leaveRequests.filter(r => r.status === 'rejected');
+      swaps = swapRequests.filter(r => r.status === 'rejected');
+      tickets = exceptionTickets.filter(t => t.status === 'rejected');
     }
 
     if (typeFilter === 'all' || typeFilter === 'leave') {
       leaves.forEach(r => {
+        if (!filterByStore(r.storeId)) return;
+        if (!filterByStage(r.status)) return;
         const emp = employees.find(e => e.id === r.employeeId);
         list.push({
           id: `leave-${r.id}`,
           sourceId: r.id,
           type: 'leave',
+          storeId: r.storeId,
           title: `${leaveTypeLabels[r.leaveType]}申请`,
           subtitle: `${r.startDate} ~ ${r.endDate}（${r.days}天）`,
           applicant: emp?.name || '',
@@ -133,12 +155,15 @@ export default function Approval() {
 
     if (typeFilter === 'all' || typeFilter === 'swap') {
       swaps.forEach(r => {
+        if (!filterByStore(r.storeId)) return;
+        if (!filterByStage(r.status)) return;
         const emp = employees.find(e => e.id === r.applicantId);
         const target = employees.find(e => e.id === r.targetId);
         list.push({
           id: `swap-${r.id}`,
           sourceId: r.id,
           type: 'swap',
+          storeId: r.storeId,
           title: `调班申请`,
           subtitle: `${r.applicantDate}（${getShiftLabel(r.applicantShift)}） ↔ ${r.targetDate}（${getShiftLabel(r.targetShift)}）（与${target?.name}对调）`,
           applicant: emp?.name || '',
@@ -154,14 +179,17 @@ export default function Approval() {
 
     if (typeFilter === 'all' || typeFilter === 'exception') {
       tickets.forEach(t => {
-        const emp = employees.find(e => e.id === t.employeeId);
+        if (!filterByStore(t.storeId)) return;
         const mappedStatus: ApprovalStatus =
           t.status === 'resolved' ? 'approved' :
-          t.status === 'rejected' ? 'rejected' : 'pending';
+          t.status === 'rejected' ? 'rejected' : 'pending_store';
+        if (!filterByStage(mappedStatus) && status === 'pending') return;
+        const emp = employees.find(e => e.id === t.employeeId);
         list.push({
           id: `ticket-${t.id}`,
           sourceId: t.id,
           type: 'exception',
+          storeId: t.storeId,
           title: `${exceptionTypeLabels[t.type]}异常`,
           subtitle: `${t.date}`,
           applicant: emp?.name || '',
@@ -174,24 +202,72 @@ export default function Approval() {
     }
 
     return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  };
+  }, [leaveRequests, swapRequests, exceptionTickets, typeFilter, storeFilter, stageFilter]);
 
   const approvalList = buildApprovalList(activeTab);
 
+  const pendingList = useMemo(() => buildApprovalList('pending'), [buildApprovalList]);
+  const approvedList = useMemo(() => buildApprovalList('approved'), [buildApprovalList]);
+  const rejectedList = useMemo(() => buildApprovalList('rejected'), [buildApprovalList]);
+
+  const selectableItems = useMemo(() => {
+    if (activeTab !== 'pending') return [];
+    return approvalList.filter(item => canHandleStatus(item.status, currentRole));
+  }, [approvalList, activeTab, currentRole]);
+
+  const allSelected = selectableItems.length > 0 && selectableItems.every(item => selectedIds.has(item.id));
+  const someSelected = selectedIds.size > 0;
+
+  const currentStore = stores.find(s => s.id === (storeFilter === 'all' ? currentStoreId : storeFilter));
+
   const tabs = [
-    { key: 'pending', label: '待审批', count: pendingLeaves.length + pendingSwaps.length + pendingTickets.length },
-    { key: 'approved', label: '已通过', count: approvedLeaves.length + approvedSwaps.length + resolvedTickets.length },
-    { key: 'rejected', label: '已拒绝', count: rejectedLeaves.length + rejectedSwaps.length + rejectedTickets.length },
+    { key: 'pending', label: '待审批', count: pendingList.length },
+    { key: 'approved', label: '已通过', count: approvedList.length },
+    { key: 'rejected', label: '已拒绝', count: rejectedList.length },
   ];
 
   const typeFilters = [
-    { key: 'all', label: '全部' },
+    { key: 'all', label: '全部类型' },
     { key: 'leave', label: '请假', icon: FileText },
     { key: 'swap', label: '调班', icon: RefreshCw },
     { key: 'exception', label: '异常', icon: AlertTriangle },
   ];
 
   const selectedItem = approvalList.find(item => item.id === selectedId);
+
+  useEffect(() => {
+    if (selectedId) {
+      const found = approvalList.some(item => item.id === selectedId);
+      if (!found) {
+        setSelectedId(null);
+        setApprovalComment('');
+      }
+    }
+  }, [approvalList, selectedId]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [activeTab, storeFilter, typeFilter, stageFilter]);
+
+  const handleToggleSelect = (itemId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(selectableItems.map(item => item.id)));
+    }
+  };
 
   const handleApprove = () => {
     if (!selectedItem) return;
@@ -210,13 +286,34 @@ export default function Approval() {
   };
 
   const handleBatchApprove = () => {
-    const pendingItems = buildApprovalList('pending');
-    let count = 0;
-    pendingItems.forEach(item => {
-      approveRequest(item.sourceId, item.type, approverRole);
-      count++;
+    if (selectedIds.size === 0) return;
+
+    const selectedItems = approvalList.filter(item => selectedIds.has(item.id));
+
+    const itemsByType: Record<string, ApprovalItem[]> = {
+      leave: [],
+      swap: [],
+      exception: [],
+    };
+
+    selectedItems.forEach(item => {
+      if (canHandleStatus(item.status, currentRole)) {
+        itemsByType[item.type].push(item);
+      }
     });
-    showToast(`已批量通过 ${count} 条审批`);
+
+    let totalCount = 0;
+    (['leave', 'swap', 'exception'] as const).forEach(type => {
+      const items = itemsByType[type];
+      if (items.length > 0) {
+        const sourceIds = items.map(item => item.sourceId);
+        batchApproveRequests(sourceIds, type, approverRole);
+        totalCount += items.length;
+      }
+    });
+
+    showToast(`已批量通过 ${totalCount} 条审批`);
+    setSelectedIds(new Set());
     setSelectedId(null);
     setApprovalComment('');
   };
@@ -240,16 +337,29 @@ export default function Approval() {
         label: '店长初审',
         role: '门店店长',
         done: true,
-        approved: managerApproval.result === 'approved',
+        approved: managerApproval.result !== 'rejected',
         time: managerApproval.createdAt,
         comment: managerApproval.comment,
+      });
+    } else if (item.status === 'pending_store') {
+      timeline.push({
+        label: '店长初审',
+        role: '门店店长',
+        done: false,
+      });
+    } else if (item.status === 'rejected') {
+      timeline.push({
+        label: '店长初审',
+        role: '门店店长',
+        done: true,
+        approved: false,
       });
     } else {
       timeline.push({
         label: '店长初审',
         role: '门店店长',
-        done: item.status !== 'pending',
-        approved: item.status === 'approved',
+        done: true,
+        approved: true,
       });
     }
 
@@ -265,16 +375,37 @@ export default function Approval() {
         time: hrApproval.createdAt,
         comment: hrApproval.comment,
       });
-    } else if (item.status !== 'pending') {
+    } else if (item.status === 'pending_hr') {
       timeline.push({
         label: '人事复核',
         role: '总部人事',
         done: false,
-        approved: undefined,
       });
+    } else if (item.status === 'approved') {
+      timeline.push({
+        label: '人事复核',
+        role: '总部人事',
+        done: true,
+        approved: true,
+      });
+    } else if (item.status === 'rejected') {
+      const managerRejected = managerApproval?.result === 'rejected';
+      if (!managerRejected) {
+        timeline.push({
+          label: '人事复核',
+          role: '总部人事',
+          done: true,
+          approved: false,
+        });
+      }
     }
 
     return timeline;
+  };
+
+  const getStoreLabel = (storeId: string) => {
+    const store = stores.find(s => s.id === storeId);
+    return store?.name || storeId;
   };
 
   return (
@@ -293,13 +424,13 @@ export default function Approval() {
             {currentStore?.name} · {currentRole === 'hr' ? '人事复核' : '店长初审'}
           </p>
         </div>
-        {activeTab === 'pending' && approvalList.length > 0 && (
+        {activeTab === 'pending' && someSelected && (
           <button
             onClick={handleBatchApprove}
             className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2"
           >
             <CheckSquare size={16} />
-            批量通过
+            批量通过（{selectedIds.size}）
           </button>
         )}
       </div>
@@ -313,7 +444,7 @@ export default function Approval() {
             <div>
               <p className="text-sm text-gray-500">待我审批</p>
               <p className="text-2xl font-bold text-amber-600">
-                {pendingLeaves.length + pendingSwaps.length + pendingTickets.length}
+                {pendingList.filter(item => canHandleStatus(item.status, currentRole)).length}
               </p>
             </div>
           </div>
@@ -327,7 +458,7 @@ export default function Approval() {
             <div>
               <p className="text-sm text-gray-500">已通过</p>
               <p className="text-2xl font-bold text-emerald-600">
-                {approvedLeaves.length + approvedSwaps.length + resolvedTickets.length}
+                {approvedList.length}
               </p>
             </div>
           </div>
@@ -341,7 +472,7 @@ export default function Approval() {
             <div>
               <p className="text-sm text-gray-500">已拒绝</p>
               <p className="text-2xl font-bold text-red-600">
-                {rejectedLeaves.length + rejectedSwaps.length + rejectedTickets.length}
+                {rejectedList.length}
               </p>
             </div>
           </div>
@@ -355,9 +486,8 @@ export default function Approval() {
             <div>
               <p className="text-sm text-gray-500">审批通过率</p>
               <p className="text-2xl font-bold text-violet-600">
-                {Math.round(((approvedLeaves.length + approvedSwaps.length + resolvedTickets.length) /
-                  ((approvedLeaves.length + approvedSwaps.length + resolvedTickets.length) +
-                   (rejectedLeaves.length + rejectedSwaps.length + rejectedTickets.length) || 1)) * 100)}%
+                {Math.round((approvedList.length /
+                  ((approvedList.length + rejectedList.length) || 1)) * 100)}%
               </p>
             </div>
           </div>
@@ -366,7 +496,7 @@ export default function Approval() {
 
       <div className="flex gap-6">
         <div className="flex-1 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          <div className="p-4 border-b border-gray-100">
+          <div className="p-4 border-b border-gray-100 space-y-4">
             <div className="flex items-center gap-2 border-b border-gray-200 -mx-4 px-4 -mt-4 pt-4">
               {tabs.map(tab => (
                 <button
@@ -385,74 +515,193 @@ export default function Approval() {
               ))}
             </div>
 
-            <div className="flex items-center gap-2 mt-4">
-              {typeFilters.map(filter => {
-                const Icon = filter.icon;
-                return (
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="relative">
+                <button
+                  onClick={() => { setStoreDropdownOpen(!storeDropdownOpen); setStageDropdownOpen(false); }}
+                  className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors min-w-[140px] justify-between"
+                >
+                  <div className="flex items-center gap-2">
+                    <StoreIcon size={14} className="text-gray-400" />
+                    <span className="text-gray-700">
+                      {storeFilter === 'all' ? '全部门店' : getStoreLabel(storeFilter)}
+                    </span>
+                  </div>
+                  <ChevronDown size={14} className="text-gray-400" />
+                </button>
+                {storeDropdownOpen && (
+                  <div className="absolute top-full left-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-10 max-h-60 overflow-y-auto">
+                    <button
+                      onClick={() => { setStoreFilter('all'); setStoreDropdownOpen(false); }}
+                      className={cn(
+                        'w-full px-3 py-2 text-left text-sm hover:bg-gray-50 transition-colors',
+                        storeFilter === 'all' && 'bg-cyan-50 text-cyan-600 font-medium'
+                      )}
+                    >
+                      全部门店
+                    </button>
+                    {stores.map(store => (
+                      <button
+                        key={store.id}
+                        onClick={() => { setStoreFilter(store.id); setStoreDropdownOpen(false); }}
+                        className={cn(
+                          'w-full px-3 py-2 text-left text-sm hover:bg-gray-50 transition-colors',
+                          storeFilter === store.id && 'bg-cyan-50 text-cyan-600 font-medium'
+                        )}
+                      >
+                        {store.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                {typeFilters.map(filter => {
+                  const Icon = filter.icon;
+                  return (
+                    <button
+                      key={filter.key}
+                      onClick={() => setTypeFilter(filter.key as ApprovalType)}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-all',
+                        typeFilter === filter.key
+                          ? 'bg-white text-cyan-600 font-medium shadow-sm'
+                          : 'text-gray-500 hover:text-gray-700'
+                      )}
+                    >
+                      {Icon && <Icon size={14} />}
+                      {filter.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {activeTab === 'pending' && (
+                <div className="relative">
                   <button
-                    key={filter.key}
-                    onClick={() => setTypeFilter(filter.key as ApprovalType)}
-                    className={cn(
-                      'flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg transition-all',
-                      typeFilter === filter.key
-                        ? 'bg-cyan-50 text-cyan-600 font-medium'
-                        : 'text-gray-500 hover:bg-gray-100'
-                    )}
+                    onClick={() => { setStageDropdownOpen(!stageDropdownOpen); setStoreDropdownOpen(false); }}
+                    className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors min-w-[140px] justify-between"
                   >
-                    {Icon && <Icon size={14} />}
-                    {filter.label}
+                    <div className="flex items-center gap-2">
+                      <Filter size={14} className="text-gray-400" />
+                      <span className="text-gray-700">
+                        {stageOptions.find(o => o.key === stageFilter)?.label || '全部环节'}
+                      </span>
+                    </div>
+                    <ChevronDown size={14} className="text-gray-400" />
                   </button>
-                );
-              })}
+                  {stageDropdownOpen && (
+                    <div className="absolute top-full left-0 mt-1 w-40 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
+                      {stageOptions.map(option => (
+                        <button
+                          key={option.key}
+                          onClick={() => { setStageFilter(option.key); setStageDropdownOpen(false); }}
+                          className={cn(
+                            'w-full px-3 py-2 text-left text-sm hover:bg-gray-50 transition-colors',
+                            stageFilter === option.key && 'bg-cyan-50 text-cyan-600 font-medium'
+                          )}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+
+            {activeTab === 'pending' && selectableItems.length > 0 && (
+              <div className="flex items-center gap-3 py-2 border-t border-gray-100 -mx-4 px-4 -mb-4">
+                <button
+                  onClick={handleToggleSelectAll}
+                  className="flex items-center gap-2 text-sm text-gray-600 hover:text-cyan-600 transition-colors"
+                >
+                  {allSelected ? (
+                    <CheckSquareFilled size={18} className="text-cyan-500" />
+                  ) : (
+                    <Square size={18} className="text-gray-300" />
+                  )}
+                  <span>全选可审批项</span>
+                </button>
+                <span className="text-xs text-gray-400">
+                  共 {selectableItems.length} 项可审批
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="max-h-[600px] overflow-y-auto">
-            {approvalList.map(item => (
-              <div
-                key={item.id}
-                onClick={() => setSelectedId(item.id)}
-                className={cn(
-                  'p-4 border-b border-gray-100 cursor-pointer transition-colors hover:bg-gray-50',
-                  selectedId === item.id && 'bg-cyan-50/50 border-l-4 border-l-cyan-500'
-                )}
-              >
-                <div className="flex items-start gap-3">
-                  <img
-                    src={item.applicantAvatar}
-                    alt={item.applicant}
-                    className="w-10 h-10 rounded-full object-cover mt-0.5"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-medium text-gray-800">{item.applicant}</span>
-                      <span className={cn(
-                        'px-2 py-0.5 text-xs rounded-full',
-                        item.type === 'leave' && 'bg-blue-100 text-blue-600',
-                        item.type === 'swap' && 'bg-violet-100 text-violet-600',
-                        item.type === 'exception' && 'bg-amber-100 text-amber-600',
-                      )}>
-                        {item.type === 'leave' ? '请假' : item.type === 'swap' ? '调班' : '异常'}
-                      </span>
+            {approvalList.map(item => {
+              const canHandle = canHandleStatus(item.status, currentRole);
+              const isSelected = selectedIds.has(item.id);
+
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => {
+                    if (activeTab === 'pending' && canHandle) {
+                      handleToggleSelect(item.id);
+                    }
+                    setSelectedId(item.id);
+                  }}
+                  className={cn(
+                    'p-4 border-b border-gray-100 cursor-pointer transition-colors hover:bg-gray-50',
+                    selectedId === item.id && 'bg-cyan-50/50 border-l-4 border-l-cyan-500',
+                    isSelected && 'bg-blue-50/30'
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    {activeTab === 'pending' && canHandle && (
+                      <div className="mt-0.5 flex-shrink-0">
+                        {isSelected ? (
+                          <CheckSquareFilled size={18} className="text-cyan-500" />
+                        ) : (
+                          <Square size={18} className="text-gray-300" />
+                        )}
+                      </div>
+                    )}
+                    <img
+                      src={item.applicantAvatar}
+                      alt={item.applicant}
+                      className="w-10 h-10 rounded-full object-cover mt-0.5"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="font-medium text-gray-800">{item.applicant}</span>
+                        <span className={cn(
+                          'px-2 py-0.5 text-xs rounded-full',
+                          item.type === 'leave' && 'bg-blue-100 text-blue-600',
+                          item.type === 'swap' && 'bg-violet-100 text-violet-600',
+                          item.type === 'exception' && 'bg-amber-100 text-amber-600',
+                        )}>
+                          {item.type === 'leave' ? '请假' : item.type === 'swap' ? '调班' : '异常'}
+                        </span>
+                        {currentRole === 'hr' && (
+                          <span className="px-2 py-0.5 text-xs bg-gray-100 text-gray-500 rounded-full">
+                            {getStoreLabel(item.storeId)}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-700 font-medium">{item.title}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">{item.subtitle}</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        提交时间：{item.createdAt}
+                      </p>
                     </div>
-                    <p className="text-sm text-gray-700 font-medium">{item.title}</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{item.subtitle}</p>
-                    <p className="text-xs text-gray-400 mt-1">
-                      提交时间：{item.createdAt}
-                    </p>
-                  </div>
-                  <div className="flex flex-col items-end gap-2">
-                    <span className={cn(
-                      'inline-flex px-2.5 py-1 text-xs font-medium rounded-full',
-                      getStatusColor(item.status)
-                    )}>
-                      {getStatusLabel(item.status)}
-                    </span>
-                    <ChevronRight size={16} className="text-gray-300" />
+                    <div className="flex flex-col items-end gap-2">
+                      <span className={cn(
+                        'inline-flex px-2.5 py-1 text-xs font-medium rounded-full',
+                        getStatusColor(item.status)
+                      )}>
+                        {getStatusLabel(item.status)}
+                      </span>
+                      <ChevronRight size={16} className="text-gray-300" />
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {approvalList.length === 0 && (
@@ -494,6 +743,10 @@ export default function Approval() {
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-500">时间</span>
                   <span className="text-sm font-medium text-gray-800">{selectedItem.subtitle}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-500">门店</span>
+                  <span className="text-sm font-medium text-gray-800">{getStoreLabel(selectedItem.storeId)}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-500">状态</span>
@@ -565,7 +818,7 @@ export default function Approval() {
               </div>
             </div>
 
-            {selectedItem.status === 'pending' && (
+            {activeTab === 'pending' && canHandleStatus(selectedItem.status, currentRole) && (
               <div className="p-5 border-t border-gray-100 space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">审批意见</label>
