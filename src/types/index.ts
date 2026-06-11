@@ -100,6 +100,11 @@ export interface LeaveRequest {
   createdAt: string;
   managerComment?: string;
   hrComment?: string;
+  currentHandlerId?: string;
+  currentHandlerName?: string;
+  reminderCount?: number;
+  lastReminderAt?: string;
+  handoffRecords?: HandoffRecord[];
 }
 
 export interface SwapRequest {
@@ -116,7 +121,24 @@ export interface SwapRequest {
   createdAt: string;
   managerComment?: string;
   hrComment?: string;
+  currentHandlerId?: string;
+  currentHandlerName?: string;
+  reminderCount?: number;
+  lastReminderAt?: string;
+  handoffRecords?: HandoffRecord[];
 }
+
+export interface HandoffRecord {
+  id: string;
+  fromHandlerId: string;
+  fromHandlerName: string;
+  toHandlerId: string;
+  toHandlerName: string;
+  reason: string;
+  createdAt: string;
+}
+
+export type ApprovalAction = 'approve' | 'reject' | 'urge' | 'handoff';
 
 export interface ApprovalRecord {
   id: string;
@@ -124,10 +146,11 @@ export interface ApprovalRecord {
   sourceType: 'leave' | 'swap' | 'exception';
   approverId: string;
   approverName: string;
-  approverRole: 'store_manager' | 'hr';
+  approverRole: 'store_manager' | 'hr' | 'assistant_manager';
   result: ApprovalStatus;
   comment: string;
   createdAt: string;
+  action?: ApprovalAction;
 }
 
 export interface AttendanceSummary {
@@ -145,6 +168,16 @@ export interface AttendanceSummary {
   bonus: number;
   fine: number;
   isLocked: boolean;
+  manualAdjustments?: ManualAdjustment[];
+}
+
+export interface ManualAdjustment {
+  id: string;
+  type: 'bonus' | 'fine';
+  amount: number;
+  reason: string;
+  operator: string;
+  createdAt: string;
 }
 
 export interface StoreRanking {
@@ -177,11 +210,12 @@ export interface ShiftTemplate {
 
 export interface BonusImpactItem {
   id: string;
-  type: 'absent' | 'late' | 'early_leave' | 'leave' | 'exception';
+  type: 'absent' | 'late' | 'early_leave' | 'leave' | 'exception' | 'manual_bonus' | 'manual_fine';
   date: string;
   description: string;
   impactAmount: number;
   sourceId: string;
+  sourceType: string;
 }
 
 export interface MonthAuditDetail {
@@ -196,4 +230,7 @@ export interface MonthAuditDetail {
   approvedLeaves: LeaveRequest[];
   resolvedExceptions: ExceptionTicket[];
   absentRecords: CheckinRecord[];
+  lateRecords: CheckinRecord[];
+  earlyLeaveRecords: CheckinRecord[];
+  manualAdjustments: ManualAdjustment[];
 }

@@ -20,7 +20,13 @@ import {
   X,
   Search,
   Eye,
-  RefreshCw
+  RefreshCw,
+  ClipboardList,
+  FileText,
+  AlertCircle,
+  Edit3,
+  PieChart as PieChartIcon,
+  ChevronRight
 } from 'lucide-react';
 import {
   BarChart,
@@ -45,6 +51,15 @@ import { cn, getStatusColor, getStatusLabel, getLeaveTypeLabel } from '@/utils';
 import type { MonthAuditDetail } from '@/types';
 
 type SummaryTab = 'ranking' | 'calculation' | 'lock' | 'certificate' | 'blacklist';
+type DrawerTab = 'clockIn' | 'leave' | 'exception' | 'adjustment' | 'summary';
+
+const DRAWER_TABS: { key: DrawerTab; label: string; icon: typeof Calendar }[] = [
+  { key: 'clockIn', label: '打卡影响', icon: AlertTriangle },
+  { key: 'leave', label: '请假记录', icon: Calendar },
+  { key: 'exception', label: '异常工单', icon: AlertCircle },
+  { key: 'adjustment', label: '手工调整', icon: Edit3 },
+  { key: 'summary', label: '汇总核对', icon: PieChartIcon },
+];
 
 export default function Summary() {
   const {
@@ -72,6 +87,9 @@ export default function Summary() {
   const [adjustFineVal, setAdjustFineVal] = useState(0);
   const [auditModal, setAuditModal] = useState<MonthAuditDetail | null>(null);
   const [isRecalculating, setIsRecalculating] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerDetail, setDrawerDetail] = useState<MonthAuditDetail | null>(null);
+  const [drawerTab, setDrawerTab] = useState<DrawerTab>('clockIn');
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -161,9 +179,13 @@ export default function Summary() {
     if (monthLocked) return;
     setIsRecalculating(true);
     setTimeout(() => {
-      recalculateSummaries(currentStoreId, currentYear, selectedMonth);
+      const affected = recalculateSummaries(currentStoreId, currentYear, selectedMonth);
       setIsRecalculating(false);
-      showToast(`${selectedMonth}月奖扣数据已重新计算`);
+      if (storeSummaries.length === 0) {
+        showToast(`已生成${affected}人的月度奖扣明细`);
+      } else {
+        showToast(`${selectedMonth}月奖扣数据已重新计算`);
+      }
     }, 500);
   };
 
@@ -236,6 +258,21 @@ export default function Summary() {
     }
   };
 
+  const handleOpenDrawer = (employeeId: string) => {
+    const auditDetails = getMonthAuditDetail(currentStoreId, currentYear, selectedMonth);
+    const detail = auditDetails.find(d => d.employeeId === employeeId);
+    if (detail) {
+      setDrawerDetail(detail);
+      setDrawerTab('clockIn');
+      setDrawerOpen(true);
+    }
+  };
+
+  const handleCloseDrawer = () => {
+    setDrawerOpen(false);
+    setTimeout(() => setDrawerDetail(null), 300);
+  };
+
   const sortedImpactItems = useMemo(() => {
     if (!auditModal) return [];
     return [...auditModal.impactItems].sort((a, b) => a.date.localeCompare(b.date));
@@ -251,6 +288,75 @@ export default function Summary() {
     return [...auditModal.resolvedExceptions].sort((a, b) => a.date.localeCompare(b.date));
   }, [auditModal]);
 
+  const drawerAbsentRecords = useMemo(() => {
+    if (!drawerDetail) return [];
+    return [...drawerDetail.absentRecords].sort((a, b) => a.date.localeCompare(b.date));
+  }, [drawerDetail]);
+
+  const drawerLateRecords = useMemo(() => {
+    if (!drawerDetail) return [];
+    return [...drawerDetail.lateRecords].sort((a, b) => a.date.localeCompare(b.date));
+  }, [drawerDetail]);
+
+  const drawerEarlyRecords = useMemo(() => {
+    if (!drawerDetail) return [];
+    return [...drawerDetail.earlyLeaveRecords].sort((a, b) => a.date.localeCompare(b.date));
+  }, [drawerDetail]);
+
+  const drawerLeaves = useMemo(() => {
+    if (!drawerDetail) return [];
+    return [...drawerDetail.approvedLeaves].sort((a, b) => a.startDate.localeCompare(b.startDate));
+  }, [drawerDetail]);
+
+  const drawerExceptions = useMemo(() => {
+    if (!drawerDetail) return [];
+    return [...drawerDetail.resolvedExceptions].sort((a, b) => a.date.localeCompare(b.date));
+  }, [drawerDetail]);
+
+  const drawerAdjustments = useMemo(() => {
+    if (!drawerDetail) return [];
+    return [...drawerDetail.manualAdjustments].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [drawerDetail]);
+
+  const autoCalculate = useMemo(() => {
+    if (!drawerDetail) return { amount: 0, breakdown: [] as string[] };
+    const absent = drawerDetail.absentRecords.length * 100;
+    const late = drawerDetail.lateRecords.length * 20;
+    const early = drawerDetail.earlyLeaveRecords.length * 20;
+    const breakdown: string[] = [];
+    if (drawerDetail.absentRecords.length > 0) breakdown.push(`缺勤${drawerDetail.absentRecords.length}次×¥100`);
+    if (drawerDetail.lateRecords.length > 0) breakdown.push(`迟到${drawerDetail.lateRecords.length}次×¥20`);
+    if (drawerDetail.earlyLeaveRecords.length > 0) breakdown.push(`早退${drawerDetail.earlyLeaveRecords.length}次×¥20`);
+    return { amount: absent + late + early, breakdown };
+  }, [drawerDetail]);
+
+  const manualTotal = useMemo(() => {
+    if (!drawerDetail) return { bonus: 0, fine: 0, breakdown: [] as string[] };
+    let bonus = 0;
+    let fine = 0;
+    const breakdown: string[] = [];
+    drawerDetail.manualAdjustments.forEach(adj => {
+      if (adj.type === 'bonus') {
+        bonus += adj.amount;
+        breakdown.push(`加奖：${adj.reason} +¥${adj.amount}`);
+      } else {
+        fine += adj.amount;
+        breakdown.push(`扣款：${adj.reason} -¥${adj.amount}`);
+      }
+    });
+    return { bonus, fine, net: bonus - fine, breakdown };
+  }, [drawerDetail]);
+
+  const finalPayout = useMemo(() => {
+    if (!drawerDetail) return { amount: 0, breakdown: [] as string[] };
+    const totalBonus = drawerDetail.totalBonus;
+    const totalFine = drawerDetail.totalFine;
+    return {
+      amount: totalBonus - totalFine,
+      breakdown: [`总奖金 +¥${totalBonus}`, `总罚款 -¥${totalFine}`]
+    };
+  }, [drawerDetail]);
+
   const filteredEmployees = useMemo(() => {
     const emps = getEmployeesByStore(currentStoreId);
     if (!searchName.trim()) return emps;
@@ -261,6 +367,15 @@ export default function Summary() {
   const totalFine = storeSummaries.reduce((sum, s) => sum + s.fine, 0);
   const totalActualDays = storeSummaries.reduce((sum, s) => sum + s.actualDays, 0);
   const totalWorkDays = storeSummaries.reduce((sum, s) => sum + s.workDays, 0);
+
+  const exceptionTypeLabel: Record<string, string> = {
+    late: '迟到申诉',
+    early_leave: '早退申诉',
+    absent: '缺勤申诉',
+    distance: '距离异常',
+    photo: '照片异常',
+    other: '其他异常',
+  };
 
   return (
     <div className="space-y-6 relative">
@@ -513,6 +628,525 @@ export default function Summary() {
             </div>
           </div>
         </div>
+      )}
+
+      {drawerDetail && (
+        <>
+          <div
+            className={cn(
+              'fixed inset-0 z-40 bg-black/40 transition-opacity duration-300',
+              drawerOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            )}
+            onClick={handleCloseDrawer}
+          />
+          <div
+            className={cn(
+              'fixed top-0 right-0 h-full z-50 bg-white shadow-2xl transition-transform duration-300 ease-out flex flex-col',
+              drawerOpen ? 'translate-x-0' : 'translate-x-full'
+            )}
+            style={{ width: '60%' }}
+          >
+            {monthLocked && (
+              <div className="bg-blue-500 text-white px-5 py-2.5 flex items-center gap-2 text-sm font-medium">
+                <CheckCircle size={16} />
+                已锁账，以下数据不可变更
+              </div>
+            )}
+
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                  <ClipboardList size={20} className="text-cyan-500" />
+                  {drawerDetail.employeeName} - {currentYear}年{selectedMonth}月 月度对账
+                </h3>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  对账编号：{drawerDetail.employeeId}-{currentYear}{String(selectedMonth).padStart(2, '0')}
+                </p>
+              </div>
+              <button onClick={handleCloseDrawer} className="text-gray-400 hover:text-gray-600 p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="border-b border-gray-100 px-5">
+              <div className="flex gap-1">
+                {DRAWER_TABS.map(tab => {
+                  const Icon = tab.icon;
+                  return (
+                    <button
+                      key={tab.key}
+                      onClick={() => setDrawerTab(tab.key)}
+                      className={cn(
+                        'flex items-center gap-2 px-4 py-3 text-sm border-b-2 transition-all -mb-px',
+                        drawerTab === tab.key
+                          ? 'border-cyan-500 text-cyan-600 font-medium'
+                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                      )}
+                    >
+                      <Icon size={15} />
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5">
+              {drawerTab === 'clockIn' && (
+                <div className="space-y-6">
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <AlertTriangle size={16} className="text-red-500" />
+                        缺勤记录
+                        <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-normal">
+                          {drawerAbsentRecords.length}条 · 每条-¥100
+                        </span>
+                      </h4>
+                      <span className="text-sm font-bold text-red-600">
+                        合计 -¥{drawerAbsentRecords.length * 100}
+                      </span>
+                    </div>
+                    {drawerAbsentRecords.length === 0 ? (
+                      <div className="text-center py-8 bg-gray-50 rounded-xl text-sm text-gray-400">
+                        <AlertTriangle size={32} className="mx-auto mb-2 text-gray-300" />
+                        本月无缺勤记录，表现优秀！
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto rounded-xl border border-gray-100">
+                        <table className="w-full">
+                          <thead className="bg-red-50">
+                            <tr>
+                              <th className="text-left text-xs font-medium text-red-600 py-2.5 px-4">日期</th>
+                              <th className="text-left text-xs font-medium text-red-600 py-2.5 px-4">类型</th>
+                              <th className="text-center text-xs font-medium text-red-600 py-2.5 px-4">影响金额</th>
+                              <th className="text-right text-xs font-medium text-red-600 py-2.5 px-4">来源打卡ID</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {drawerAbsentRecords.map(r => (
+                              <tr key={r.id} className="border-t border-gray-100 hover:bg-red-50/50">
+                                <td className="py-3 px-4 text-sm text-gray-700">{r.date}</td>
+                                <td className="py-3 px-4">
+                                  <span className={cn('px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor('absent'))}>
+                                    {getStatusLabel('absent')}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 text-center text-sm font-medium text-red-600">-¥100</td>
+                                <td className="py-3 px-4 text-right text-xs text-gray-400 font-mono">{r.id}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <AlertTriangle size={16} className="text-amber-500" />
+                        迟到记录
+                        <span className="text-xs bg-amber-100 text-amber-600 px-2 py-0.5 rounded-full font-normal">
+                          {drawerLateRecords.length}条 · 每条-¥20
+                        </span>
+                      </h4>
+                      <span className="text-sm font-bold text-amber-600">
+                        合计 -¥{drawerLateRecords.length * 20}
+                      </span>
+                    </div>
+                    {drawerLateRecords.length === 0 ? (
+                      <div className="text-center py-8 bg-gray-50 rounded-xl text-sm text-gray-400">
+                        <AlertTriangle size={32} className="mx-auto mb-2 text-gray-300" />
+                        本月无迟到记录，守时标兵！
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto rounded-xl border border-gray-100">
+                        <table className="w-full">
+                          <thead className="bg-amber-50">
+                            <tr>
+                              <th className="text-left text-xs font-medium text-amber-600 py-2.5 px-4">日期</th>
+                              <th className="text-left text-xs font-medium text-amber-600 py-2.5 px-4">类型</th>
+                              <th className="text-center text-xs font-medium text-amber-600 py-2.5 px-4">影响金额</th>
+                              <th className="text-right text-xs font-medium text-amber-600 py-2.5 px-4">来源打卡ID</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {drawerLateRecords.map(r => (
+                              <tr key={r.id} className="border-t border-gray-100 hover:bg-amber-50/50">
+                                <td className="py-3 px-4 text-sm text-gray-700">{r.date}</td>
+                                <td className="py-3 px-4">
+                                  <span className={cn('px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor('late'))}>
+                                    {getStatusLabel('late')}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 text-center text-sm font-medium text-amber-600">-¥20</td>
+                                <td className="py-3 px-4 text-right text-xs text-gray-400 font-mono">{r.id}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <AlertTriangle size={16} className="text-orange-500" />
+                        早退记录
+                        <span className="text-xs bg-orange-100 text-orange-600 px-2 py-0.5 rounded-full font-normal">
+                          {drawerEarlyRecords.length}条 · 每条-¥20
+                        </span>
+                      </h4>
+                      <span className="text-sm font-bold text-orange-600">
+                        合计 -¥{drawerEarlyRecords.length * 20}
+                      </span>
+                    </div>
+                    {drawerEarlyRecords.length === 0 ? (
+                      <div className="text-center py-8 bg-gray-50 rounded-xl text-sm text-gray-400">
+                        <AlertTriangle size={32} className="mx-auto mb-2 text-gray-300" />
+                        本月无早退记录，敬业爱岗！
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto rounded-xl border border-gray-100">
+                        <table className="w-full">
+                          <thead className="bg-orange-50">
+                            <tr>
+                              <th className="text-left text-xs font-medium text-orange-600 py-2.5 px-4">日期</th>
+                              <th className="text-left text-xs font-medium text-orange-600 py-2.5 px-4">类型</th>
+                              <th className="text-center text-xs font-medium text-orange-600 py-2.5 px-4">影响金额</th>
+                              <th className="text-right text-xs font-medium text-orange-600 py-2.5 px-4">来源打卡ID</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {drawerEarlyRecords.map(r => (
+                              <tr key={r.id} className="border-t border-gray-100 hover:bg-orange-50/50">
+                                <td className="py-3 px-4 text-sm text-gray-700">{r.date}</td>
+                                <td className="py-3 px-4">
+                                  <span className={cn('px-2 py-0.5 text-xs font-medium rounded-full', getStatusColor('early_leave'))}>
+                                    {getStatusLabel('early_leave')}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 text-center text-sm font-medium text-orange-600">-¥20</td>
+                                <td className="py-3 px-4 text-right text-xs text-gray-400 font-mono">{r.id}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {drawerTab === 'leave' && (
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                      <Calendar size={16} className="text-violet-500" />
+                      已审批请假记录
+                      <span className="text-xs bg-violet-100 text-violet-600 px-2 py-0.5 rounded-full font-normal">
+                        共{drawerLeaves.length}条
+                      </span>
+                    </h4>
+                  </div>
+                  {drawerLeaves.length === 0 ? (
+                    <div className="text-center py-12 bg-gray-50 rounded-xl text-sm text-gray-400">
+                      <Calendar size={40} className="mx-auto mb-3 text-gray-300" />
+                      本月无已审批请假
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-xl border border-gray-100">
+                      <table className="w-full">
+                        <thead className="bg-violet-50">
+                          <tr>
+                            <th className="text-left text-xs font-medium text-violet-600 py-2.5 px-4">类型</th>
+                            <th className="text-left text-xs font-medium text-violet-600 py-2.5 px-4">开始日期</th>
+                            <th className="text-left text-xs font-medium text-violet-600 py-2.5 px-4">结束日期</th>
+                            <th className="text-center text-xs font-medium text-violet-600 py-2.5 px-4">天数</th>
+                            <th className="text-center text-xs font-medium text-violet-600 py-2.5 px-4">状态</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {drawerLeaves.map(leave => (
+                            <tr key={leave.id} className="border-t border-gray-100 hover:bg-violet-50/50">
+                              <td className="py-3 px-4">
+                                <span className="px-2.5 py-1 text-xs font-medium bg-violet-100 text-violet-700 rounded-full">
+                                  {getLeaveTypeLabel(leave.leaveType)}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-sm text-gray-700">{leave.startDate}</td>
+                              <td className="py-3 px-4 text-sm text-gray-700">{leave.endDate}</td>
+                              <td className="py-3 px-4 text-center text-sm font-medium text-gray-700">{leave.days}天</td>
+                              <td className="py-3 px-4 text-center">
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-emerald-100 text-emerald-700 rounded-full">
+                                  <CheckCircle size={12} />
+                                  已审批通过
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {drawerTab === 'exception' && (
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                      <AlertCircle size={16} className="text-cyan-500" />
+                      异常工单记录
+                      <span className="text-xs bg-cyan-100 text-cyan-600 px-2 py-0.5 rounded-full font-normal">
+                        共{drawerExceptions.length}条
+                      </span>
+                    </h4>
+                  </div>
+                  {drawerExceptions.length === 0 ? (
+                    <div className="text-center py-12 bg-gray-50 rounded-xl text-sm text-gray-400">
+                      <AlertCircle size={40} className="mx-auto mb-3 text-gray-300" />
+                      本月无异常工单
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-xl border border-gray-100">
+                      <table className="w-full">
+                        <thead className="bg-cyan-50">
+                          <tr>
+                            <th className="text-left text-xs font-medium text-cyan-600 py-2.5 px-4">日期</th>
+                            <th className="text-left text-xs font-medium text-cyan-600 py-2.5 px-4">类型</th>
+                            <th className="text-left text-xs font-medium text-cyan-600 py-2.5 px-4">描述</th>
+                            <th className="text-center text-xs font-medium text-cyan-600 py-2.5 px-4">状态</th>
+                            <th className="text-right text-xs font-medium text-cyan-600 py-2.5 px-4">处理人</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {drawerExceptions.map(ticket => (
+                            <tr key={ticket.id} className="border-t border-gray-100 hover:bg-cyan-50/50">
+                              <td className="py-3 px-4 text-sm text-gray-700">{ticket.date}</td>
+                              <td className="py-3 px-4">
+                                <span className="px-2.5 py-1 text-xs font-medium bg-cyan-100 text-cyan-700 rounded-full">
+                                  {exceptionTypeLabel[ticket.type] || ticket.type}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-sm text-gray-600 max-w-xs truncate">{ticket.description}</td>
+                              <td className="py-3 px-4 text-center">
+                                <span className={cn('px-2.5 py-1 text-xs font-medium rounded-full', getStatusColor(ticket.status))}>
+                                  {getStatusLabel(ticket.status)}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-right text-sm text-gray-500">{ticket.handler || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {drawerTab === 'adjustment' && (
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                      <Edit3 size={16} className="text-amber-500" />
+                      手工调整记录
+                      <span className="text-xs bg-amber-100 text-amber-600 px-2 py-0.5 rounded-full font-normal">
+                        共{drawerAdjustments.length}条
+                      </span>
+                    </h4>
+                    {!monthLocked && (
+                      <button
+                        onClick={() => {
+                          const summary = storeSummaries.find(s => s.employeeId === drawerDetail?.employeeId);
+                          if (summary) handleOpenAdjust(summary.id);
+                          handleCloseDrawer();
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
+                      >
+                        <Edit3 size={12} />
+                        新增调整
+                      </button>
+                    )}
+                  </div>
+                  {drawerAdjustments.length === 0 ? (
+                    <div className="text-center py-12 bg-gray-50 rounded-xl text-sm text-gray-400">
+                      <Edit3 size={40} className="mx-auto mb-3 text-gray-300" />
+                      本月无手工调整记录
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-xl border border-gray-100">
+                      <table className="w-full">
+                        <thead className="bg-amber-50">
+                          <tr>
+                            <th className="text-left text-xs font-medium text-amber-600 py-2.5 px-4">调整时间</th>
+                            <th className="text-left text-xs font-medium text-amber-600 py-2.5 px-4">类型</th>
+                            <th className="text-center text-xs font-medium text-amber-600 py-2.5 px-4">金额</th>
+                            <th className="text-left text-xs font-medium text-amber-600 py-2.5 px-4">原因</th>
+                            <th className="text-right text-xs font-medium text-amber-600 py-2.5 px-4">操作人</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {drawerAdjustments.map(adj => (
+                            <tr key={adj.id} className="border-t border-gray-100 hover:bg-amber-50/50">
+                              <td className="py-3 px-4 text-sm text-gray-700 whitespace-nowrap">{adj.createdAt}</td>
+                              <td className="py-3 px-4">
+                                <span className={cn(
+                                  'px-2.5 py-1 text-xs font-medium rounded-full',
+                                  adj.type === 'bonus'
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : 'bg-red-100 text-red-700'
+                                )}>
+                                  {adj.type === 'bonus' ? '加奖' : '扣款'}
+                                </span>
+                              </td>
+                              <td className={cn(
+                                'py-3 px-4 text-center text-sm font-bold',
+                                adj.type === 'bonus' ? 'text-emerald-600' : 'text-red-600'
+                              )}>
+                                {adj.type === 'bonus' ? '+' : '-'}¥{adj.amount}
+                              </td>
+                              <td className="py-3 px-4 text-sm text-gray-600">{adj.reason}</td>
+                              <td className="py-3 px-4 text-right text-sm text-gray-500">{adj.operator}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {drawerTab === 'summary' && drawerDetail && (
+                <div className="space-y-6">
+                  <h4 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                    <PieChartIcon size={16} className="text-cyan-500" />
+                    月度对账汇总
+                  </h4>
+
+                  <div className="grid grid-cols-3 gap-5">
+                    <div className="bg-gradient-to-br from-gray-50 to-slate-50 rounded-xl p-5 border border-gray-200">
+                      <div className="flex items-center gap-2 mb-3">
+                        <div className="w-8 h-8 bg-gray-200 rounded-lg flex items-center justify-center">
+                          <BarChart3 size={16} className="text-gray-600" />
+                        </div>
+                        <p className="text-sm font-medium text-gray-700">系统自动计算</p>
+                      </div>
+                      <p className="text-3xl font-bold text-gray-800 mb-3">
+                        -¥{autoCalculate.amount}
+                      </p>
+                      <div className="space-y-1.5 border-t border-gray-200 pt-3">
+                        {autoCalculate.breakdown.length === 0 ? (
+                          <p className="text-xs text-gray-400">无打卡影响</p>
+                        ) : (
+                          autoCalculate.breakdown.map((b, i) => (
+                            <div key={i} className="flex items-center justify-between text-xs">
+                              <span className="text-gray-500">{b}</span>
+                              <ChevronRight size={12} className="text-gray-300" />
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-br from-amber-50 to-yellow-50 rounded-xl p-5 border border-amber-200">
+                      <div className="flex items-center gap-2 mb-3">
+                        <div className="w-8 h-8 bg-amber-200 rounded-lg flex items-center justify-center">
+                          <Edit3 size={16} className="text-amber-700" />
+                        </div>
+                        <p className="text-sm font-medium text-amber-700">手工调整合计</p>
+                      </div>
+                      <p className={cn(
+                        'text-3xl font-bold mb-3',
+                        (manualTotal.net || 0) >= 0 ? 'text-emerald-600' : 'text-red-600'
+                      )}>
+                        {(manualTotal.net || 0) >= 0 ? '+' : ''}¥{(manualTotal.net || 0)}
+                      </p>
+                      <div className="space-y-1.5 border-t border-amber-200 pt-3">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-emerald-600">加奖合计</span>
+                          <span className="font-medium text-emerald-600">+¥{manualTotal.bonus || 0}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-red-600">扣款合计</span>
+                          <span className="font-medium text-red-600">-¥{manualTotal.fine || 0}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-gradient-to-br from-cyan-50 to-blue-50 rounded-xl p-5 border border-cyan-200">
+                      <div className="flex items-center gap-2 mb-3">
+                        <div className="w-8 h-8 bg-cyan-200 rounded-lg flex items-center justify-center">
+                          <DollarSign size={16} className="text-cyan-700" />
+                        </div>
+                        <p className="text-sm font-medium text-cyan-700">最终应发</p>
+                      </div>
+                      <p className={cn(
+                        'text-3xl font-bold mb-3',
+                        finalPayout.amount >= 0 ? 'text-cyan-600' : 'text-red-600'
+                      )}>
+                        {finalPayout.amount >= 0 ? '+' : ''}¥{finalPayout.amount}
+                      </p>
+                      <div className="space-y-1.5 border-t border-cyan-200 pt-3">
+                        {finalPayout.breakdown.map((b, i) => (
+                          <div key={i} className="flex items-center justify-between text-xs">
+                            <span className="text-gray-500">{b}</span>
+                            <ChevronRight size={12} className="text-cyan-200" />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-50 rounded-xl p-5 border border-gray-200">
+                    <h5 className="text-sm font-medium text-gray-700 mb-4 flex items-center gap-2">
+                      <FileText size={15} className="text-gray-500" />
+                      计算公式说明
+                    </h5>
+                    <div className="space-y-3 text-sm text-gray-600">
+                      <div className="flex items-start gap-3">
+                        <span className="w-2 h-2 mt-2 rounded-full bg-gray-400 flex-shrink-0" />
+                        <p>
+                          <span className="font-medium text-gray-700">系统自动计算：</span>
+                          缺勤次数×¥100 + 迟到次数×¥20 + 早退次数×¥20
+                        </p>
+                      </div>
+                      <div className="flex items-start gap-3">
+                        <span className="w-2 h-2 mt-2 rounded-full bg-amber-400 flex-shrink-0" />
+                        <p>
+                          <span className="font-medium text-gray-700">手工调整合计：</span>
+                          所有加奖金额之和 - 所有扣款金额之和
+                        </p>
+                      </div>
+                      <div className="flex items-start gap-3">
+                        <span className="w-2 h-2 mt-2 rounded-full bg-cyan-400 flex-shrink-0" />
+                        <p>
+                          <span className="font-medium text-gray-700">最终应发：</span>
+                          月度总奖金 - 月度总罚款（含自动计算和手工调整）
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-cyan-50 rounded-xl p-5 border border-cyan-100">
+                    <div className="flex items-start gap-3">
+                      <AlertCircle size={18} className="text-cyan-500 flex-shrink-0 mt-0.5" />
+                      <div className="text-sm text-cyan-700">
+                        <p className="font-medium mb-1">对账确认</p>
+                        <p className="text-cyan-600 text-xs leading-relaxed">
+                          请仔细核对上述各项明细数据。如无异议，请点击"月末锁账"确认月度对账完成。
+                          锁账后所有数据将不可修改，如需调整请联系管理员解锁。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
       )}
 
       <div className="flex items-center justify-between">
@@ -861,6 +1495,13 @@ export default function Summary() {
                                 调整
                               </button>
                             )}
+                            <button
+                              onClick={() => handleOpenDrawer(summary.employeeId)}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-violet-600 bg-violet-50 rounded hover:bg-violet-100 transition-colors"
+                            >
+                              <ClipboardList size={12} />
+                              对账
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -870,6 +1511,17 @@ export default function Summary() {
                     <tr>
                       <td colSpan={10} className="py-10 text-center text-sm text-gray-400">
                         暂无匹配的员工数据
+                        {!monthLocked && storeSummaries.length === 0 && (
+                          <div className="mt-3">
+                            <button
+                              onClick={handleRecalculate}
+                              className="inline-flex items-center gap-1.5 px-4 py-2 bg-cyan-500 text-white rounded-lg text-sm hover:bg-cyan-600 transition-colors"
+                            >
+                              <RefreshCw size={14} />
+                              点击生成本月奖扣明细
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   )}
@@ -1106,3 +1758,4 @@ export default function Summary() {
     </div>
   );
 }
+
