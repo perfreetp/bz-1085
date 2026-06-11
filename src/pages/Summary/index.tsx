@@ -1,8 +1,8 @@
 import { useState, useMemo } from 'react';
-import { 
-  BarChart3, 
-  Trophy, 
-  Lock, 
+import {
+  BarChart3,
+  Trophy,
+  Lock,
   FileDown,
   ShieldAlert,
   TrendingUp,
@@ -16,15 +16,17 @@ import {
   AlertTriangle,
   ToggleLeft,
   ToggleRight,
-  ChevronDown
+  CheckCircle,
+  X,
+  Search
 } from 'lucide-react';
-import { 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
   ResponsiveContainer,
   LineChart,
   Line,
@@ -33,26 +35,70 @@ import {
   Cell,
   Legend
 } from 'recharts';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
-import { getStoreRankings, blacklistRules, getSummariesByStore, attendanceSummaries } from '@/data/summaries';
 import { getEmployeesByStore, employees } from '@/data/employees';
 import { format } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
 import { cn } from '@/utils';
 
 type SummaryTab = 'ranking' | 'calculation' | 'lock' | 'certificate' | 'blacklist';
 
 export default function Summary() {
-  const { currentStoreId, currentRole } = useAppStore();
+  const {
+    currentStoreId,
+    summaries,
+    blacklistRules,
+    lockedMonths,
+    lockMonth,
+    isMonthLocked,
+    adjustBonus,
+    toggleBlacklistRule
+  } = useBusinessStore();
+
   const [activeTab, setActiveTab] = useState<SummaryTab>('ranking');
-  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
-  const [isLocked, setIsLocked] = useState(false);
-  const [rules, setRules] = useState(blacklistRules);
+  const currentYear = new Date().getFullYear();
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+  const [toast, setToast] = useState<string | null>(null);
+  const [searchName, setSearchName] = useState('');
+  const [adjustModal, setAdjustModal] = useState<{ summaryId: string; empName: string; bonus: number; fine: number } | null>(null);
+  const [adjustBonusVal, setAdjustBonusVal] = useState(0);
+  const [adjustFineVal, setAdjustFineVal] = useState(0);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  };
 
   const currentStore = stores.find(s => s.id === currentStoreId);
-  const rankings = getStoreRankings(selectedMonth + 1);
-  const storeSummaries = getSummariesByStore(currentStoreId, selectedMonth + 1);
+
+  const monthLocked = isMonthLocked(currentStoreId, currentYear, selectedMonth);
+
+  const storeSummaries = useMemo(() =>
+    summaries.filter(s => s.storeId === currentStoreId && s.month === selectedMonth),
+    [summaries, currentStoreId, selectedMonth]
+  );
+
+  const rankings = useMemo(() => {
+    const list = stores.map(store => {
+      const storeS = summaries.filter(s => s.storeId === store.id && s.month === selectedMonth);
+      const totalWorkDays = storeS.reduce((sum, s) => sum + s.workDays, 0);
+      const totalActualDays = storeS.reduce((sum, s) => sum + s.actualDays, 0);
+      const attendanceRate = totalWorkDays > 0 ? Math.round((totalActualDays / totalWorkDays) * 1000) / 10 : 0;
+      const exceptionCount = storeS.reduce((sum, s) => sum + s.lateCount + s.earlyLeaveCount + s.absentCount, 0);
+      const trends: Array<'up' | 'down' | 'stable'> = ['up', 'down', 'stable'];
+      return {
+        storeId: store.id,
+        storeName: store.name,
+        attendanceRate,
+        exceptionCount,
+        rank: 0,
+        trend: trends[Math.floor(Math.random() * 3)]
+      };
+    });
+    list.sort((a, b) => b.attendanceRate - a.attendanceRate);
+    list.forEach((r, idx) => r.rank = idx + 1);
+    return list;
+  }, [summaries, selectedMonth]);
 
   const chartData = useMemo(() => {
     return stores.slice(0, 5).map(store => {
@@ -89,22 +135,77 @@ export default function Summary() {
     { key: 'blacklist', label: '黑名单规则', icon: ShieldAlert },
   ];
 
-  const toggleRule = (ruleId: string) => {
-    setRules(prev => prev.map(r => 
-      r.id === ruleId ? { ...r, enabled: !r.enabled } : r
-    ));
-  };
-
   const handleLockMonth = () => {
-    if (confirm('确定要锁定本月考勤数据吗？锁定后将无法修改。')) {
-      setIsLocked(true);
-      alert('本月考勤数据已锁定');
-    }
+    lockMonth(currentStoreId, currentYear, selectedMonth);
+    showToast(`${selectedMonth}月考勤数据已锁定`);
   };
 
   const handleGenerateCertificate = (empId: string) => {
-    alert('正在生成出勤证明...');
+    const emp = employees.find(e => e.id === empId);
+    const summary = storeSummaries.find(s => s.employeeId === empId);
+    if (!emp) return;
+
+    const storeName = currentStore?.name || '未知门店';
+    const actualDays = summary?.actualDays ?? 0;
+    const workDays = summary?.workDays ?? 22;
+    const rate = workDays > 0 ? Math.round((actualDays / workDays) * 100) : 0;
+
+    const content = [
+      '═══════════════════════════════════',
+      '          出 勤 证 明',
+      '═══════════════════════════════════',
+      '',
+      `员工姓名：${emp.name}`,
+      `所属门店：${storeName}`,
+      `职    位：${emp.position}`,
+      `证明月份：${currentYear}年${selectedMonth}月`,
+      `应出勤天数：${workDays}天`,
+      `实际出勤天数：${actualDays}天`,
+      `出勤率：${rate}%`,
+      `迟到次数：${summary?.lateCount ?? 0}次`,
+      `早退次数：${summary?.earlyLeaveCount ?? 0}次`,
+      `缺勤次数：${summary?.absentCount ?? 0}次`,
+      `请假天数：${summary?.leaveDays ?? 0}天`,
+      '',
+      '特此证明。',
+      '',
+      `出具日期：${format(new Date(), 'yyyy年M月d日')}`,
+      '═══════════════════════════════════',
+    ].join('\n');
+
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `出勤证明_${emp.name}_${currentYear}年${selectedMonth}月.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`已下载 ${emp.name} 的出勤证明`);
   };
+
+  const handleOpenAdjust = (summaryId: string) => {
+    const s = storeSummaries.find(item => item.id === summaryId);
+    if (!s) return;
+    const emp = employees.find(e => e.id === s.employeeId);
+    setAdjustModal({ summaryId, empName: emp?.name || '', bonus: s.bonus, fine: s.fine });
+    setAdjustBonusVal(s.bonus);
+    setAdjustFineVal(s.fine);
+  };
+
+  const handleConfirmAdjust = () => {
+    if (!adjustModal) return;
+    adjustBonus(adjustModal.summaryId, adjustBonusVal, adjustFineVal);
+    showToast(`已调整 ${adjustModal.empName} 的奖扣明细`);
+    setAdjustModal(null);
+  };
+
+  const filteredEmployees = useMemo(() => {
+    const emps = getEmployeesByStore(currentStoreId);
+    if (!searchName.trim()) return emps;
+    return emps.filter(e => e.name.includes(searchName.trim()));
+  }, [currentStoreId, searchName]);
 
   const totalBonus = storeSummaries.reduce((sum, s) => sum + s.bonus, 0);
   const totalFine = storeSummaries.reduce((sum, s) => sum + s.fine, 0);
@@ -112,7 +213,61 @@ export default function Summary() {
   const totalWorkDays = storeSummaries.reduce((sum, s) => sum + s.workDays, 0);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {toast && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-500 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in text-sm font-medium">
+          <CheckCircle size={16} />
+          {toast}
+        </div>
+      )}
+
+      {adjustModal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-800">调整奖扣 — {adjustModal.empName}</h3>
+              <button onClick={() => setAdjustModal(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-600 mb-1">奖金（元）</label>
+                <input
+                  type="number"
+                  value={adjustBonusVal}
+                  onChange={e => setAdjustBonusVal(Number(e.target.value))}
+                  className="w-full h-10 px-3 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-600 mb-1">罚款（元）</label>
+                <input
+                  type="number"
+                  value={adjustFineVal}
+                  onChange={e => setAdjustFineVal(Number(e.target.value))}
+                  className="w-full h-10 px-3 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setAdjustModal(null)}
+                className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleConfirmAdjust}
+                className="px-4 py-2 text-sm text-white bg-cyan-500 rounded-lg hover:bg-cyan-600 transition-colors"
+              >
+                确认调整
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">总部汇总</h1>
@@ -127,7 +282,7 @@ export default function Summary() {
             className="h-9 px-3 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
           >
             {Array.from({ length: 12 }, (_, i) => (
-              <option key={i} value={i}>{i + 1}月</option>
+              <option key={i + 1} value={i + 1}>{i + 1}月</option>
             ))}
           </select>
           <button className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2">
@@ -234,7 +389,7 @@ export default function Summary() {
                 <h3 className="font-semibold text-gray-800 mb-4">门店出勤率排行</h3>
                 <div className="space-y-3">
                   {rankings.map(store => (
-                    <div 
+                    <div
                       key={store.storeId}
                       className={cn(
                         'flex items-center gap-4 p-4 rounded-xl transition-all',
@@ -259,7 +414,7 @@ export default function Summary() {
                           <span className="text-lg font-bold text-cyan-600">{store.attendanceRate}%</span>
                         </div>
                         <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                          <div 
+                          <div
                             className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 rounded-full"
                             style={{ width: `${store.attendanceRate}%` }}
                           ></div>
@@ -267,7 +422,7 @@ export default function Summary() {
                       </div>
                       <div className={cn(
                         'flex items-center gap-1 text-xs',
-                        store.trend === 'up' ? 'text-emerald-600' : 
+                        store.trend === 'up' ? 'text-emerald-600' :
                         store.trend === 'down' ? 'text-red-600' : 'text-gray-500'
                       )}>
                         {store.trend === 'up' && <TrendingUp size={14} />}
@@ -334,17 +489,17 @@ export default function Summary() {
                     <YAxis tick={{ fontSize: 12 }} />
                     <Tooltip />
                     <Legend />
-                    <Line 
-                      type="monotone" 
-                      dataKey="出勤率" 
-                      stroke="#06b6d4" 
+                    <Line
+                      type="monotone"
+                      dataKey="出勤率"
+                      stroke="#06b6d4"
                       strokeWidth={2}
                       dot={{ fill: '#06b6d4', r: 4 }}
                     />
-                    <Line 
-                      type="monotone" 
-                      dataKey="异常率" 
-                      stroke="#f97316" 
+                    <Line
+                      type="monotone"
+                      dataKey="异常率"
+                      stroke="#f97316"
                       strokeWidth={2}
                       dot={{ fill: '#f97316', r: 4 }}
                     />
@@ -359,7 +514,13 @@ export default function Summary() {
           <div className="p-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-gray-800">员工考勤奖扣明细</h3>
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
+                {monthLocked && (
+                  <span className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
+                    <Lock size={12} />
+                    已锁账
+                  </span>
+                )}
                 <button className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors">
                   重新计算
                 </button>
@@ -391,8 +552,8 @@ export default function Summary() {
                       <tr key={summary.id} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-3">
-                            <img 
-                              src={emp?.avatar} 
+                            <img
+                              src={emp?.avatar}
                               alt={emp?.name}
                               className="w-8 h-8 rounded-full object-cover"
                             />
@@ -411,7 +572,16 @@ export default function Summary() {
                         <td className="py-3 px-4 text-center text-sm font-medium text-emerald-600">+¥{summary.bonus}</td>
                         <td className="py-3 px-4 text-center text-sm font-medium text-red-600">-¥{summary.fine}</td>
                         <td className="py-3 px-4 text-center">
-                          <button className="text-sm text-cyan-600 hover:text-cyan-700">调整</button>
+                          {monthLocked ? (
+                            <span className="text-sm text-gray-300 cursor-not-allowed">调整</span>
+                          ) : (
+                            <button
+                              onClick={() => handleOpenAdjust(summary.id)}
+                              className="text-sm text-cyan-600 hover:text-cyan-700"
+                            >
+                              调整
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -427,19 +597,19 @@ export default function Summary() {
             <div className="max-w-2xl mx-auto text-center py-12">
               <div className={cn(
                 'w-20 h-20 rounded-full mx-auto mb-6 flex items-center justify-center',
-                isLocked ? 'bg-emerald-100' : 'bg-amber-100'
+                monthLocked ? 'bg-emerald-100' : 'bg-amber-100'
               )}>
-                <Lock size={36} className={isLocked ? 'text-emerald-600' : 'text-amber-600'} />
+                <Lock size={36} className={monthLocked ? 'text-emerald-600' : 'text-amber-600'} />
               </div>
               <h3 className="text-xl font-semibold text-gray-800 mb-2">
-                {selectedMonth + 1}月考勤数据
+                {selectedMonth}月考勤数据
               </h3>
               <p className="text-gray-500 mb-6">
-                {isLocked 
-                  ? '本月考勤数据已锁定，不可修改' 
+                {monthLocked
+                  ? '本月考勤数据已锁定，不可修改'
                   : '当前数据未锁定，可继续调整'}
               </p>
-              
+
               <div className="bg-gray-50 rounded-xl p-6 mb-6 text-left">
                 <h4 className="font-medium text-gray-700 mb-4">锁账说明</h4>
                 <ul className="space-y-2 text-sm text-gray-600">
@@ -450,8 +620,8 @@ export default function Summary() {
                 </ul>
               </div>
 
-              {!isLocked ? (
-                <button 
+              {!monthLocked ? (
+                <button
                   onClick={handleLockMonth}
                   className="px-8 py-3 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium hover:shadow-lg transition-shadow flex items-center gap-2 mx-auto"
                 >
@@ -473,10 +643,13 @@ export default function Summary() {
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-gray-800">员工出勤证明</h3>
               <div className="relative">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
                   type="text"
-                  placeholder="搜索员工..."
-                  className="w-64 h-9 pl-3 pr-4 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  placeholder="搜索员工姓名..."
+                  value={searchName}
+                  onChange={e => setSearchName(e.target.value)}
+                  className="w-64 h-9 pl-9 pr-4 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
                 />
               </div>
             </div>
@@ -493,18 +666,18 @@ export default function Summary() {
                   </tr>
                 </thead>
                 <tbody>
-                  {getEmployeesByStore(currentStoreId).slice(0, 8).map(emp => {
+                  {filteredEmployees.slice(0, 8).map(emp => {
                     const summary = storeSummaries.find(s => s.employeeId === emp.id);
-                    const rate = summary && summary.workDays > 0 
-                      ? Math.round((summary.actualDays / summary.workDays) * 100) 
+                    const rate = summary && summary.workDays > 0
+                      ? Math.round((summary.actualDays / summary.workDays) * 100)
                       : 95;
-                    
+
                     return (
                       <tr key={emp.id} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-3">
-                            <img 
-                              src={emp.avatar} 
+                            <img
+                              src={emp.avatar}
                               alt={emp.name}
                               className="w-8 h-8 rounded-full object-cover"
                             />
@@ -524,7 +697,7 @@ export default function Summary() {
                         <td className="py-3 px-4 text-center">
                           <span className={cn(
                             'inline-flex px-2.5 py-1 text-xs font-medium rounded-full',
-                            emp.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 
+                            emp.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
                             emp.status === 'blacklist' ? 'bg-red-100 text-red-700' :
                             'bg-gray-100 text-gray-700'
                           )}>
@@ -532,7 +705,7 @@ export default function Summary() {
                           </span>
                         </td>
                         <td className="py-3 px-4 text-center">
-                          <button 
+                          <button
                             onClick={() => handleGenerateCertificate(emp.id)}
                             className="inline-flex items-center gap-1 px-3 py-1.5 text-sm text-cyan-600 bg-cyan-50 rounded-lg hover:bg-cyan-100 transition-colors"
                           >
@@ -560,24 +733,27 @@ export default function Summary() {
                 </button>
               </div>
               <div className="grid grid-cols-3 gap-4">
-                {rules.map(rule => (
-                  <div 
+                {blacklistRules.map(rule => (
+                  <div
                     key={rule.id}
                     className={cn(
                       'p-5 rounded-xl border transition-all',
-                      rule.enabled 
-                        ? 'bg-white border-gray-200' 
+                      rule.enabled
+                        ? 'bg-white border-gray-200'
                         : 'bg-gray-50 border-gray-100 opacity-70'
                     )}
                   >
                     <div className="flex items-center justify-between mb-3">
                       <h4 className="font-medium text-gray-800">{rule.name}</h4>
-                      <button 
-                        onClick={() => toggleRule(rule.id)}
+                      <button
+                        onClick={() => {
+                          toggleBlacklistRule(rule.id);
+                          showToast(rule.enabled ? `已关闭规则：${rule.name}` : `已开启规则：${rule.name}`);
+                        }}
                         className="text-gray-400 hover:text-gray-600 transition-colors"
                       >
-                        {rule.enabled 
-                          ? <ToggleRight size={24} className="text-cyan-500" /> 
+                        {rule.enabled
+                          ? <ToggleRight size={24} className="text-cyan-500" />
                           : <ToggleLeft size={24} />
                         }
                       </button>
@@ -585,7 +761,7 @@ export default function Summary() {
                     <p className="text-sm text-gray-500 mb-3">{rule.description}</p>
                     <div className="flex items-center gap-4 text-xs text-gray-400">
                       <span>阈值：{rule.threshold}次</span>
-                      <span>周期：{rule.period === 'month' ? '每月' : '每季度'}</span>
+                      <span>周期：{rule.period === 'month' ? '每月' : rule.period === 'quarter' ? '每季度' : '每年'}</span>
                     </div>
                   </div>
                 ))}
@@ -601,15 +777,15 @@ export default function Summary() {
               </div>
               <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                 {employees.filter(e => e.status === 'blacklist').map(emp => {
-                  const store = stores.find(s => s.id === emp.storeId);
+                  const empStore = stores.find(s => s.id === emp.storeId);
                   return (
-                    <div 
+                    <div
                       key={emp.id}
                       className="flex items-center justify-between p-4 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
                     >
                       <div className="flex items-center gap-3">
-                        <img 
-                          src={emp.avatar} 
+                        <img
+                          src={emp.avatar}
                           alt={emp.name}
                           className="w-10 h-10 rounded-full object-cover"
                         />
@@ -620,7 +796,7 @@ export default function Summary() {
                               黑名单
                             </span>
                           </div>
-                          <p className="text-xs text-gray-400">{store?.name} · {emp.position}</p>
+                          <p className="text-xs text-gray-400">{empStore?.name} · {emp.position}</p>
                         </div>
                       </div>
                       <div className="flex items-center gap-3">

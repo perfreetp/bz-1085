@@ -1,8 +1,8 @@
-import { useState } from 'react';
-import { 
-  CheckSquare, 
-  CheckCircle, 
-  XCircle, 
+import { useState, useEffect, useCallback } from 'react';
+import {
+  CheckSquare,
+  CheckCircle,
+  XCircle,
   Clock,
   FileText,
   RefreshCw,
@@ -11,14 +11,11 @@ import {
   MessageSquare,
   User
 } from 'lucide-react';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
-import { leaveRequests, leaveTypeLabels } from '@/data/leaves';
-import { swapRequests } from '@/data/swaps';
-import { exceptionTickets, exceptionTypeLabels } from '@/data/exceptions';
 import { employees } from '@/data/employees';
-import { format } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
+import { leaveTypeLabels } from '@/data/leaves';
+import { exceptionTypeLabels } from '@/data/exceptions';
 import { cn, getStatusColor, getStatusLabel, getShiftLabel } from '@/utils';
 import type { ApprovalStatus } from '@/types';
 
@@ -27,6 +24,7 @@ type ApprovalType = 'all' | 'leave' | 'swap' | 'exception';
 
 interface ApprovalItem {
   id: string;
+  sourceId: string;
   type: 'leave' | 'swap' | 'exception';
   title: string;
   subtitle: string;
@@ -35,16 +33,35 @@ interface ApprovalItem {
   status: ApprovalStatus;
   createdAt: string;
   detail: string;
+  managerComment?: string;
+  hrComment?: string;
 }
 
 export default function Approval() {
-  const { currentStoreId, currentRole } = useAppStore();
+  const {
+    currentStoreId,
+    currentRole,
+    leaveRequests,
+    swapRequests,
+    exceptionTickets,
+    approvalRecords,
+    approveRequest,
+    rejectRequest,
+  } = useBusinessStore();
+
   const [activeTab, setActiveTab] = useState<ApprovalTab>('pending');
   const [typeFilter, setTypeFilter] = useState<ApprovalType>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [approvalComment, setApprovalComment] = useState('');
+  const [toast, setToast] = useState<string | null>(null);
 
   const currentStore = stores.find(s => s.id === currentStoreId);
+  const approverRole = currentRole === 'hr' ? 'hr' as const : 'store_manager' as const;
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  }, []);
 
   const pendingLeaves = leaveRequests.filter(r => r.storeId === currentStoreId && r.status === 'pending');
   const pendingSwaps = swapRequests.filter(r => r.storeId === currentStoreId && r.status === 'pending');
@@ -57,6 +74,22 @@ export default function Approval() {
   const rejectedLeaves = leaveRequests.filter(r => r.storeId === currentStoreId && r.status === 'rejected');
   const rejectedSwaps = swapRequests.filter(r => r.storeId === currentStoreId && r.status === 'rejected');
   const rejectedTickets = exceptionTickets.filter(t => t.storeId === currentStoreId && t.status === 'rejected');
+
+  useEffect(() => {
+    if (selectedId) {
+      const leaves = activeTab === 'pending' ? pendingLeaves : activeTab === 'approved' ? approvedLeaves : rejectedLeaves;
+      const swaps = activeTab === 'pending' ? pendingSwaps : activeTab === 'approved' ? approvedSwaps : rejectedSwaps;
+      const tickets = activeTab === 'pending' ? pendingTickets : activeTab === 'approved' ? resolvedTickets : rejectedTickets;
+      let found = false;
+      if (typeFilter === 'all' || typeFilter === 'leave') found = leaves.some(r => `leave-${r.id}` === selectedId);
+      if (!found && (typeFilter === 'all' || typeFilter === 'swap')) found = swaps.some(r => `swap-${r.id}` === selectedId);
+      if (!found && (typeFilter === 'all' || typeFilter === 'exception')) found = tickets.some(t => `ticket-${t.id}` === selectedId);
+      if (!found) {
+        setSelectedId(null);
+        setApprovalComment('');
+      }
+    }
+  }, [leaveRequests, swapRequests, exceptionTickets, activeTab, selectedId]);
 
   const buildApprovalList = (status: ApprovalTab): ApprovalItem[] => {
     const list: ApprovalItem[] = [];
@@ -83,14 +116,17 @@ export default function Approval() {
         const emp = employees.find(e => e.id === r.employeeId);
         list.push({
           id: `leave-${r.id}`,
+          sourceId: r.id,
           type: 'leave',
           title: `${leaveTypeLabels[r.leaveType]}申请`,
           subtitle: `${r.startDate} ~ ${r.endDate}（${r.days}天）`,
           applicant: emp?.name || '',
           applicantAvatar: emp?.avatar || '',
-          status: r.status as ApprovalStatus,
+          status: r.status,
           createdAt: r.createdAt,
           detail: r.reason,
+          managerComment: r.managerComment,
+          hrComment: r.hrComment,
         });
       });
     }
@@ -101,14 +137,17 @@ export default function Approval() {
         const target = employees.find(e => e.id === r.targetId);
         list.push({
           id: `swap-${r.id}`,
+          sourceId: r.id,
           type: 'swap',
           title: `调班申请`,
-          subtitle: `${r.applicantDate} ↔ ${r.targetDate}（与${target?.name}对调）`,
+          subtitle: `${r.applicantDate}（${getShiftLabel(r.applicantShift)}） ↔ ${r.targetDate}（${getShiftLabel(r.targetShift)}）（与${target?.name}对调）`,
           applicant: emp?.name || '',
           applicantAvatar: emp?.avatar || '',
-          status: r.status as ApprovalStatus,
+          status: r.status,
           createdAt: r.createdAt,
           detail: r.reason,
+          managerComment: r.managerComment,
+          hrComment: r.hrComment,
         });
       });
     }
@@ -116,14 +155,18 @@ export default function Approval() {
     if (typeFilter === 'all' || typeFilter === 'exception') {
       tickets.forEach(t => {
         const emp = employees.find(e => e.id === t.employeeId);
+        const mappedStatus: ApprovalStatus =
+          t.status === 'resolved' ? 'approved' :
+          t.status === 'rejected' ? 'rejected' : 'pending';
         list.push({
           id: `ticket-${t.id}`,
+          sourceId: t.id,
           type: 'exception',
           title: `${exceptionTypeLabels[t.type]}异常`,
           subtitle: `${t.date}`,
           applicant: emp?.name || '',
           applicantAvatar: emp?.avatar || '',
-          status: (t.status === 'resolved' ? 'approved' : t.status === 'rejected' ? 'rejected' : 'pending') as ApprovalStatus,
+          status: mappedStatus,
           createdAt: t.createdAt,
           detail: t.description,
         });
@@ -151,21 +194,98 @@ export default function Approval() {
   const selectedItem = approvalList.find(item => item.id === selectedId);
 
   const handleApprove = () => {
-    alert('已通过审批');
+    if (!selectedItem) return;
+    approveRequest(selectedItem.sourceId, selectedItem.type, approverRole);
+    showToast(`${selectedItem.type === 'leave' ? '请假' : selectedItem.type === 'swap' ? '调班' : '异常'}申请已通过`);
     setSelectedId(null);
+    setApprovalComment('');
   };
 
   const handleReject = () => {
-    alert('已拒绝审批');
+    if (!selectedItem) return;
+    rejectRequest(selectedItem.sourceId, selectedItem.type, approverRole, approvalComment || undefined);
+    showToast(`${selectedItem.type === 'leave' ? '请假' : selectedItem.type === 'swap' ? '调班' : '异常'}申请已拒绝`);
     setSelectedId(null);
+    setApprovalComment('');
   };
 
   const handleBatchApprove = () => {
-    alert(`已批量通过 ${approvalList.length} 条审批`);
+    const pendingItems = buildApprovalList('pending');
+    let count = 0;
+    pendingItems.forEach(item => {
+      approveRequest(item.sourceId, item.type, approverRole);
+      count++;
+    });
+    showToast(`已批量通过 ${count} 条审批`);
+    setSelectedId(null);
+    setApprovalComment('');
+  };
+
+  const getApprovalTimeline = (item: ApprovalItem) => {
+    const timeline: { label: string; role: string; done: boolean; approved?: boolean; time?: string; comment?: string }[] = [];
+
+    timeline.push({
+      label: '提交申请',
+      role: '申请人提交',
+      done: true,
+      approved: true,
+      time: item.createdAt,
+    });
+
+    const managerApproval = approvalRecords.find(
+      r => r.sourceId === item.sourceId && r.sourceType === item.type && r.approverRole === 'store_manager'
+    );
+    if (managerApproval) {
+      timeline.push({
+        label: '店长初审',
+        role: '门店店长',
+        done: true,
+        approved: managerApproval.result === 'approved',
+        time: managerApproval.createdAt,
+        comment: managerApproval.comment,
+      });
+    } else {
+      timeline.push({
+        label: '店长初审',
+        role: '门店店长',
+        done: item.status !== 'pending',
+        approved: item.status === 'approved',
+      });
+    }
+
+    const hrApproval = approvalRecords.find(
+      r => r.sourceId === item.sourceId && r.sourceType === item.type && r.approverRole === 'hr'
+    );
+    if (hrApproval) {
+      timeline.push({
+        label: '人事复核',
+        role: '总部人事',
+        done: true,
+        approved: hrApproval.result === 'approved',
+        time: hrApproval.createdAt,
+        comment: hrApproval.comment,
+      });
+    } else if (item.status !== 'pending') {
+      timeline.push({
+        label: '人事复核',
+        role: '总部人事',
+        done: false,
+        approved: undefined,
+      });
+    }
+
+    return timeline;
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {toast && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-500 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in text-sm font-medium">
+          <CheckCircle size={16} />
+          {toast}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">审批中心</h1>
@@ -174,7 +294,7 @@ export default function Approval() {
           </p>
         </div>
         {activeTab === 'pending' && approvalList.length > 0 && (
-          <button 
+          <button
             onClick={handleBatchApprove}
             className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2"
           >
@@ -235,8 +355,8 @@ export default function Approval() {
             <div>
               <p className="text-sm text-gray-500">审批通过率</p>
               <p className="text-2xl font-bold text-violet-600">
-                {Math.round(((approvedLeaves.length + approvedSwaps.length + resolvedTickets.length) / 
-                  ((approvedLeaves.length + approvedSwaps.length + resolvedTickets.length) + 
+                {Math.round(((approvedLeaves.length + approvedSwaps.length + resolvedTickets.length) /
+                  ((approvedLeaves.length + approvedSwaps.length + resolvedTickets.length) +
                    (rejectedLeaves.length + rejectedSwaps.length + rejectedTickets.length) || 1)) * 100)}%
               </p>
             </div>
@@ -251,7 +371,7 @@ export default function Approval() {
               {tabs.map(tab => (
                 <button
                   key={tab.key}
-                  onClick={() => setActiveTab(tab.key as ApprovalTab)}
+                  onClick={() => { setActiveTab(tab.key as ApprovalTab); setSelectedId(null); setApprovalComment(''); }}
                   className={cn(
                     'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
                     activeTab === tab.key
@@ -298,8 +418,8 @@ export default function Approval() {
                 )}
               >
                 <div className="flex items-start gap-3">
-                  <img 
-                    src={item.applicantAvatar} 
+                  <img
+                    src={item.applicantAvatar}
                     alt={item.applicant}
                     className="w-10 h-10 rounded-full object-cover mt-0.5"
                   />
@@ -353,8 +473,8 @@ export default function Approval() {
 
             <div className="p-5 space-y-5 overflow-y-auto max-h-[500px]">
               <div className="flex items-center gap-3">
-                <img 
-                  src={selectedItem.applicantAvatar} 
+                <img
+                  src={selectedItem.applicantAvatar}
                   alt={selectedItem.applicant}
                   className="w-12 h-12 rounded-full object-cover"
                 />
@@ -396,68 +516,51 @@ export default function Approval() {
                 </p>
               </div>
 
+              {selectedItem.managerComment && (
+                <div className="pt-3 border-t border-gray-100">
+                  <p className="text-sm font-medium text-gray-800 mb-2">店长意见</p>
+                  <p className="text-sm text-gray-600 bg-blue-50 p-3 rounded-lg">{selectedItem.managerComment}</p>
+                </div>
+              )}
+
+              {selectedItem.hrComment && (
+                <div className="pt-3 border-t border-gray-100">
+                  <p className="text-sm font-medium text-gray-800 mb-2">人事意见</p>
+                  <p className="text-sm text-gray-600 bg-violet-50 p-3 rounded-lg">{selectedItem.hrComment}</p>
+                </div>
+              )}
+
               <div className="pt-3 border-t border-gray-100">
                 <p className="text-sm font-medium text-gray-800 mb-3">审批流程</p>
                 <div className="space-y-3">
-                  <div className="flex gap-3">
-                    <div className="w-6 h-6 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <User size={12} className="text-emerald-600" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-700">提交申请</span>
-                        <span className="text-xs text-gray-400">{selectedItem.createdAt}</span>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-0.5">申请人提交</p>
-                    </div>
-                    <CheckCircle size={16} className="text-emerald-500" />
-                  </div>
-                  <div className="flex gap-3">
-                    <div className={cn(
-                      'w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5',
-                      selectedItem.status === 'pending' ? 'bg-amber-100' : 'bg-emerald-100'
-                    )}>
-                      <User size={12} className={selectedItem.status === 'pending' ? 'text-amber-600' : 'text-emerald-600'} />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-700">店长初审</span>
-                        <span className="text-xs text-gray-400">
-                          {selectedItem.status === 'pending' ? '待审批' : '已审批'}
-                        </span>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-0.5">门店店长</p>
-                    </div>
-                    {selectedItem.status !== 'pending' && (
-                      selectedItem.status === 'approved' 
-                        ? <CheckCircle size={16} className="text-emerald-500" />
-                        : <XCircle size={16} className="text-red-500" />
-                    )}
-                  </div>
-                  {currentRole === 'hr' && (
-                    <div className="flex gap-3">
+                  {getApprovalTimeline(selectedItem).map((step, idx) => (
+                    <div key={idx} className="flex gap-3">
                       <div className={cn(
                         'w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5',
-                        selectedItem.status === 'pending' ? 'bg-gray-100' : 'bg-emerald-100'
+                        step.done && step.approved && 'bg-emerald-100',
+                        step.done && step.approved === false && 'bg-red-100',
+                        !step.done && 'bg-gray-100',
                       )}>
-                        <User size={12} className={selectedItem.status === 'pending' ? 'text-gray-400' : 'text-emerald-600'} />
+                        <User size={12} className={cn(
+                          step.done && step.approved && 'text-emerald-600',
+                          step.done && step.approved === false && 'text-red-600',
+                          !step.done && 'text-gray-400',
+                        )} />
                       </div>
                       <div className="flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-gray-700">人事复核</span>
+                          <span className="text-sm font-medium text-gray-700">{step.label}</span>
                           <span className="text-xs text-gray-400">
-                            {selectedItem.status === 'pending' ? '待审批' : '已审批'}
+                            {step.done ? (step.approved ? '已通过' : step.approved === false ? '已拒绝' : '已审批') : '待审批'}
                           </span>
                         </div>
-                        <p className="text-xs text-gray-500 mt-0.5">总部人事</p>
+                        <p className="text-xs text-gray-500 mt-0.5">{step.role}</p>
+                        {step.time && <p className="text-xs text-gray-400 mt-0.5">{step.time}</p>}
                       </div>
-                      {selectedItem.status !== 'pending' && (
-                        selectedItem.status === 'approved' 
-                          ? <CheckCircle size={16} className="text-emerald-500" />
-                          : <XCircle size={16} className="text-red-500" />
-                      )}
+                      {step.done && step.approved && <CheckCircle size={16} className="text-emerald-500" />}
+                      {step.done && step.approved === false && <XCircle size={16} className="text-red-500" />}
                     </div>
-                  )}
+                  ))}
                 </div>
               </div>
             </div>
@@ -466,7 +569,7 @@ export default function Approval() {
               <div className="p-5 border-t border-gray-100 space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">审批意见</label>
-                  <textarea 
+                  <textarea
                     value={approvalComment}
                     onChange={e => setApprovalComment(e.target.value)}
                     rows={3}

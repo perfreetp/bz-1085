@@ -1,8 +1,8 @@
 import { Bell, Search, Settings, User } from 'lucide-react';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 
 export default function Header() {
-  const { currentRole, setCurrentRole } = useAppStore();
+  const { currentRole, setCurrentRole } = useBusinessStore();
 
   return (
     <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6 sticky top-0 z-10">

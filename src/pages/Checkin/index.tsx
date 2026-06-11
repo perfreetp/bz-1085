@@ -1,39 +1,47 @@
 import { useState } from 'react';
-import { 
-  Search, 
-  Filter, 
-  MapPin, 
-  Camera, 
+import {
+  Search,
+  Filter,
+  MapPin,
+  Camera,
   AlertTriangle,
   CheckCircle,
   XCircle,
   Clock,
   UserPlus,
   Eye,
-  Download
+  Download,
 } from 'lucide-react';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
-import { getCheckinRecordsByStore } from '@/data/checkins';
-import { getEmployeesByStore } from '@/data/employees';
+import { getEmployeesByStore, employees } from '@/data/employees';
 import { format } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
 import { cn, getStatusColor, getStatusLabel } from '@/utils';
 
 export default function Checkin() {
-  const { currentStoreId } = useAppStore();
+  const { currentStoreId, checkinRecords, registerAbsent, createExceptionTicket } = useBusinessStore();
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [searchText, setSearchText] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [showAbsentModal, setShowAbsentModal] = useState(false);
+  const [absentForm, setAbsentForm] = useState({
+    employeeId: '',
+    date: format(new Date(), 'yyyy-MM-dd'),
+    reason: '',
+  });
 
   const currentStore = stores.find(s => s.id === currentStoreId);
-  const employees = getEmployeesByStore(currentStoreId);
-  let records = getCheckinRecordsByStore(currentStoreId, selectedDate);
+  const storeEmployees = getEmployeesByStore(currentStoreId);
+
+  let records = checkinRecords.filter(
+    r => r.storeId === currentStoreId && r.date === selectedDate
+  );
 
   if (searchText) {
     records = records.filter(r => {
-      const emp = employees.find(e => e.id === r.employeeId);
+      const emp = storeEmployees.find(e => e.id === r.employeeId);
       return emp?.name.includes(searchText);
     });
   }
@@ -44,34 +52,78 @@ export default function Checkin() {
 
   const abnormalCount = records.filter(r => r.isDistanceAbnormal || r.isPhotoAbnormal).length;
 
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  };
+
   const handleViewPhoto = (recordId: string) => {
     setSelectedRecord(selectedRecord === recordId ? null : recordId);
   };
 
   const handleRegisterAbsent = () => {
-    alert('缺勤登记功能');
+    setShowAbsentModal(true);
+  };
+
+  const submitAbsent = () => {
+    if (!absentForm.employeeId || !absentForm.reason.trim()) {
+      showToast('请填写完整的缺勤登记信息');
+      return;
+    }
+    registerAbsent(absentForm.employeeId, currentStoreId, absentForm.date, absentForm.reason);
+    setShowAbsentModal(false);
+    setAbsentForm({ employeeId: '', date: format(new Date(), 'yyyy-MM-dd'), reason: '' });
+    showToast('缺勤登记成功');
+  };
+
+  const handleCreateTicket = (record: typeof records[number]) => {
+    const emp = storeEmployees.find(e => e.id === record.employeeId);
+    const type = record.isPhotoAbnormal ? 'photo' : 'distance';
+    createExceptionTicket({
+      employeeId: record.employeeId,
+      storeId: currentStoreId,
+      type,
+      date: record.date,
+      description: record.isPhotoAbnormal
+        ? `${emp?.name || '员工'}打卡照片无法识别为人脸`
+        : `${emp?.name || '员工'}打卡距离门店${record.distance}米，超出范围`,
+      priority: 'high',
+    });
+    showToast('异常工单已生成');
+  };
+
+  const handleVerifyPass = () => {
+    showToast('核验通过');
+    setSelectedRecord(null);
   };
 
   const handleExport = () => {
-    alert('导出打卡记录');
+    showToast('打卡记录已导出');
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {toast && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-500 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in text-sm font-medium">
+          <CheckCircle size={16} />
+          {toast}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">移动打卡记录</h1>
           <p className="text-gray-500 text-sm mt-1">{currentStore?.name} · 打卡核验</p>
         </div>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={handleRegisterAbsent}
             className="px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors flex items-center gap-2"
           >
             <UserPlus size={16} />
             缺勤登记
           </button>
-          <button 
+          <button
             onClick={handleExport}
             className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2"
           >
@@ -194,12 +246,12 @@ export default function Checkin() {
             </thead>
             <tbody>
               {records.map(record => {
-                const emp = employees.find(e => e.id === record.employeeId);
+                const emp = storeEmployees.find(e => e.id === record.employeeId);
                 const isAbnormal = record.isDistanceAbnormal || record.isPhotoAbnormal;
-                
+
                 return (
-                  <tr 
-                    key={record.id} 
+                  <tr
+                    key={record.id}
                     className={cn(
                       'border-t border-gray-100 hover:bg-gray-50 transition-colors',
                       isAbnormal && 'bg-red-50/30'
@@ -207,8 +259,8 @@ export default function Checkin() {
                   >
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-3">
-                        <img 
-                          src={emp?.avatar} 
+                        <img
+                          src={emp?.avatar}
                           alt={emp?.name}
                           className="w-9 h-9 rounded-full object-cover"
                         />
@@ -219,7 +271,7 @@ export default function Checkin() {
                       </div>
                     </td>
                     <td className="py-3 px-4">
-                      <div 
+                      <div
                         className="relative w-12 h-12 rounded-lg overflow-hidden cursor-pointer group"
                         onClick={() => handleViewPhoto(record.id)}
                       >
@@ -297,7 +349,7 @@ export default function Checkin() {
                     </td>
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
-                        <button 
+                        <button
                           onClick={() => handleViewPhoto(record.id)}
                           className="p-1.5 text-cyan-600 hover:bg-cyan-50 rounded-md transition-colors"
                           title="查看详情"
@@ -305,7 +357,8 @@ export default function Checkin() {
                           <Eye size={16} />
                         </button>
                         {isAbnormal && (
-                          <button 
+                          <button
+                            onClick={() => handleCreateTicket(record)}
                             className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-md transition-colors"
                             title="生成工单"
                           >
@@ -331,128 +384,196 @@ export default function Checkin() {
         )}
       </div>
 
-      {selectedRecord && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedRecord(null)}>
-          <div 
-            className="bg-white rounded-2xl w-[500px] max-h-[90vh] overflow-auto shadow-2xl"
+      {selectedRecord && (() => {
+        const record = records.find(r => r.id === selectedRecord);
+        const emp = storeEmployees.find(e => e.id === record?.employeeId);
+        if (!record || !emp) return null;
+
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedRecord(null)}>
+            <div
+              className="bg-white rounded-2xl w-[500px] max-h-[90vh] overflow-auto shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="p-6 border-b border-gray-100">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold text-gray-800">打卡详情核验</h3>
+                  <button
+                    onClick={() => setSelectedRecord(null)}
+                    className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg"
+                  >
+                    <XCircle size={20} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6 space-y-5">
+                <div className="flex items-center gap-4">
+                  <img
+                    src={emp.avatar}
+                    alt={emp.name}
+                    className="w-14 h-14 rounded-full object-cover"
+                  />
+                  <div>
+                    <h4 className="font-semibold text-gray-800">{emp.name}</h4>
+                    <p className="text-sm text-gray-500">{emp.position} · {currentStore?.name}</p>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 rounded-xl p-4">
+                  <p className="text-sm font-medium text-gray-700 mb-3">打卡照片</p>
+                  <div className="aspect-video bg-gradient-to-br from-cyan-50 to-blue-100 rounded-lg flex items-center justify-center">
+                    <Camera size={48} className="text-cyan-300" />
+                  </div>
+                  <div className="mt-3 flex items-center justify-between text-sm">
+                    <span className="text-gray-500">人脸核验</span>
+                    <span className={cn(
+                      'font-medium',
+                      record.isPhotoAbnormal ? 'text-red-600' : 'text-emerald-600'
+                    )}>
+                      {record.isPhotoAbnormal ? '核验失败' : '核验通过'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-gray-50 rounded-xl p-4">
+                    <p className="text-xs text-gray-500 mb-1">上班打卡</p>
+                    <p className="text-lg font-semibold text-gray-800">
+                      {record.checkInTime || '--:--'}
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-4">
+                    <p className="text-xs text-gray-500 mb-1">下班打卡</p>
+                    <p className="text-lg font-semibold text-gray-800">
+                      {record.checkOutTime || '--:--'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-500 flex items-center gap-2">
+                      <MapPin size={14} />
+                      打卡位置
+                    </span>
+                    <span className="text-gray-700 max-w-[200px] text-right truncate">
+                      {record.location}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-500">距离门店</span>
+                    <span className={cn(
+                      'font-medium',
+                      record.isDistanceAbnormal ? 'text-red-600' : 'text-gray-700'
+                    )}>
+                      {record.distance} 米
+                      {record.isDistanceAbnormal && '（异常）'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-500">打卡状态</span>
+                    <span className={cn(
+                      'px-2.5 py-1 text-xs font-medium rounded-full',
+                      getStatusColor(record.status)
+                    )}>
+                      {getStatusLabel(record.status)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={handleVerifyPass}
+                    className="flex-1 py-2.5 bg-emerald-500 text-white rounded-lg text-sm font-medium hover:bg-emerald-600 transition-colors"
+                  >
+                    核验通过
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleCreateTicket(record);
+                      setSelectedRecord(null);
+                    }}
+                    className="flex-1 py-2.5 bg-amber-500 text-white rounded-lg text-sm font-medium hover:bg-amber-600 transition-colors"
+                  >
+                    生成工单
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {showAbsentModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAbsentModal(false)}>
+          <div
+            className="bg-white rounded-2xl w-[440px] shadow-2xl"
             onClick={e => e.stopPropagation()}
           >
             <div className="p-6 border-b border-gray-100">
               <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-800">打卡详情核验</h3>
-                <button 
-                  onClick={() => setSelectedRecord(null)}
+                <h3 className="text-lg font-semibold text-gray-800">缺勤登记</h3>
+                <button
+                  onClick={() => setShowAbsentModal(false)}
                   className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg"
                 >
                   <XCircle size={20} />
                 </button>
               </div>
             </div>
-            
-            {(() => {
-              const record = records.find(r => r.id === selectedRecord);
-              const emp = employees.find(e => e.id === record?.employeeId);
-              if (!record || !emp) return null;
 
-              return (
-                <div className="p-6 space-y-5">
-                  <div className="flex items-center gap-4">
-                    <img 
-                      src={emp.avatar} 
-                      alt={emp.name}
-                      className="w-14 h-14 rounded-full object-cover"
-                    />
-                    <div>
-                      <h4 className="font-semibold text-gray-800">{emp.name}</h4>
-                      <p className="text-sm text-gray-500">{emp.position} · {currentStore?.name}</p>
-                    </div>
-                  </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">选择员工</label>
+                <select
+                  value={absentForm.employeeId}
+                  onChange={e => setAbsentForm(f => ({ ...f, employeeId: e.target.value }))}
+                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                >
+                  <option value="">请选择员工</option>
+                  {storeEmployees.map(emp => (
+                    <option key={emp.id} value={emp.id}>{emp.name} - {emp.position}</option>
+                  ))}
+                </select>
+              </div>
 
-                  <div className="bg-gray-50 rounded-xl p-4">
-                    <p className="text-sm font-medium text-gray-700 mb-3">打卡照片</p>
-                    <div className="aspect-video bg-gradient-to-br from-cyan-50 to-blue-100 rounded-lg flex items-center justify-center">
-                      <Camera size={48} className="text-cyan-300" />
-                    </div>
-                    <div className="mt-3 flex items-center justify-between text-sm">
-                      <span className="text-gray-500">人脸核验</span>
-                      <span className={cn(
-                        'font-medium',
-                        record.isPhotoAbnormal ? 'text-red-600' : 'text-emerald-600'
-                      )}>
-                        {record.isPhotoAbnormal ? '核验失败' : '核验通过'}
-                      </span>
-                    </div>
-                  </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">缺勤日期</label>
+                <input
+                  type="date"
+                  value={absentForm.date}
+                  onChange={e => setAbsentForm(f => ({ ...f, date: e.target.value }))}
+                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-gray-50 rounded-xl p-4">
-                      <p className="text-xs text-gray-500 mb-1">上班打卡</p>
-                      <p className="text-lg font-semibold text-gray-800">
-                        {record.checkInTime || '--:--'}
-                      </p>
-                    </div>
-                    <div className="bg-gray-50 rounded-xl p-4">
-                      <p className="text-xs text-gray-500 mb-1">下班打卡</p>
-                      <p className="text-lg font-semibold text-gray-800">
-                        {record.checkOutTime || '--:--'}
-                      </p>
-                    </div>
-                  </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">缺勤原因</label>
+                <textarea
+                  value={absentForm.reason}
+                  onChange={e => setAbsentForm(f => ({ ...f, reason: e.target.value }))}
+                  placeholder="请输入缺勤原因..."
+                  rows={3}
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 resize-none"
+                />
+              </div>
 
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-gray-500 flex items-center gap-2">
-                        <MapPin size={14} />
-                        打卡位置
-                      </span>
-                      <span className="text-gray-700 max-w-[200px] text-right truncate">
-                        {record.location}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-gray-500">距离门店</span>
-                      <span className={cn(
-                        'font-medium',
-                        record.isDistanceAbnormal ? 'text-red-600' : 'text-gray-700'
-                      )}>
-                        {record.distance} 米
-                        {record.isDistanceAbnormal && '（异常）'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-gray-500">打卡状态</span>
-                      <span className={cn(
-                        'px-2.5 py-1 text-xs font-medium rounded-full',
-                        getStatusColor(record.status)
-                      )}>
-                        {getStatusLabel(record.status)}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-3 pt-2">
-                    <button 
-                      onClick={() => {
-                        alert('核验通过');
-                        setSelectedRecord(null);
-                      }}
-                      className="flex-1 py-2.5 bg-emerald-500 text-white rounded-lg text-sm font-medium hover:bg-emerald-600 transition-colors"
-                    >
-                      核验通过
-                    </button>
-                    <button 
-                      onClick={() => {
-                        alert('已生成异常工单');
-                        setSelectedRecord(null);
-                      }}
-                      className="flex-1 py-2.5 bg-amber-500 text-white rounded-lg text-sm font-medium hover:bg-amber-600 transition-colors"
-                    >
-                      生成工单
-                    </button>
-                  </div>
-                </div>
-              );
-            })()}
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setShowAbsentModal(false)}
+                  className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={submitAbsent}
+                  className="flex-1 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow"
+                >
+                  确认登记
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

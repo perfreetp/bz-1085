@@ -8,14 +8,14 @@ import {
   Users,
   Calendar,
   Store,
-  ArrowLeftRight
+  ArrowLeftRight,
+  Check
 } from 'lucide-react';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
 import { getEmployeesByStore } from '@/data/employees';
-import { schedules } from '@/data/schedules';
 import { shiftTemplates } from '@/data/shiftTemplates';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, addMonths, subMonths, isSameMonth, isToday, startOfWeek, addDays } from 'date-fns';
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, addMonths, subMonths, isSameMonth, isToday, startOfWeek, addDays, subWeeks } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { cn, getShiftColor, getShiftLabel } from '@/utils';
 import type { ShiftType } from '@/types';
@@ -23,24 +23,30 @@ import type { ShiftType } from '@/types';
 type ViewMode = 'month' | 'week';
 
 export default function Schedule() {
-  const { currentStoreId } = useAppStore();
+  const { currentStoreId, schedules, upsertSchedule, copyWeekSchedules } = useBusinessStore();
   const [viewMode, setViewMode] = useState<ViewMode>('week');
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedShift, setSelectedShift] = useState<ShiftType | null>(null);
   const [showShiftPanel, setShowShiftPanel] = useState(true);
+  const [toast, setToast] = useState<string | null>(null);
 
   const currentStore = stores.find(s => s.id === currentStoreId);
-  const employees = getEmployeesByStore(currentStoreId);
+  const storeEmployees = getEmployeesByStore(currentStoreId);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2000);
+  };
+
+  const weekDays = useMemo(() => {
+    const start = startOfWeek(currentDate, { weekStartsOn: 1 });
+    return Array.from({ length: 7 }, (_, i) => addDays(start, i));
+  }, [currentDate]);
 
   const monthDays = useMemo(() => {
     const start = startOfWeek(startOfMonth(currentDate), { weekStartsOn: 1 });
     const end = endOfMonth(currentDate);
     return eachDayOfInterval({ start, end });
-  }, [currentDate]);
-
-  const weekDays = useMemo(() => {
-    const start = startOfWeek(currentDate, { weekStartsOn: 1 });
-    return Array.from({ length: 7 }, (_, i) => addDays(start, i));
   }, [currentDate]);
 
   const days = viewMode === 'month' ? monthDays : weekDays;
@@ -58,21 +64,66 @@ export default function Schedule() {
   };
 
   const handleCopyWeek = () => {
-    alert('已复制上周排班到本周');
+    const curWeekStart = format(startOfWeek(currentDate, { weekStartsOn: 1 }), 'yyyy-MM-dd');
+    const prevWeekStart = format(startOfWeek(subWeeks(currentDate, 1), { weekStartsOn: 1 }), 'yyyy-MM-dd');
+    copyWeekSchedules(currentStoreId, prevWeekStart, curWeekStart);
+    showToast('已复制上周排班到本周');
   };
 
   const handleBatchSchedule = () => {
-    alert('批量排班功能');
+    if (!selectedShift) {
+      showToast('请先选择班次模板');
+      return;
+    }
+    const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
+    storeEmployees.forEach(emp => {
+      for (let i = 0; i < 5; i++) {
+        const dateStr = format(addDays(weekStart, i), 'yyyy-MM-dd');
+        upsertSchedule(emp.id, currentStoreId, dateStr, selectedShift);
+      }
+    });
+    showToast(`已为全部员工排 ${getShiftLabel(selectedShift)}（周一至周五）`);
   };
 
   const handleShiftClick = (employeeId: string, dateStr: string) => {
-    if (selectedShift) {
-      alert(`已将 ${dateStr} 的班次设置为 ${getShiftLabel(selectedShift)}`);
+    if (!selectedShift) {
+      showToast('请先在左侧选择班次模板');
+      return;
     }
+    upsertSchedule(employeeId, currentStoreId, dateStr, selectedShift);
+    showToast(`已将 ${dateStr} 的班次设置为 ${getShiftLabel(selectedShift)}`);
   };
 
+  const empSchedulesMap = useMemo(() => {
+    const map: Record<string, Record<string, typeof schedules[0]>> = {};
+    schedules.forEach(s => {
+      if (!map[s.employeeId]) map[s.employeeId] = {};
+      map[s.employeeId][s.date] = s;
+    });
+    return map;
+  }, [schedules]);
+
+  const shiftStats = useMemo(() => {
+    const startStr = format(days[0], 'yyyy-MM-dd');
+    const endStr = format(days[days.length - 1], 'yyyy-MM-dd');
+    const relevant = schedules.filter(s => s.storeId === currentStoreId && s.date >= startStr && s.date <= endStr);
+    return {
+      morning: relevant.filter(s => s.shiftType === 'morning').length,
+      middle: relevant.filter(s => s.shiftType === 'middle').length,
+      evening: relevant.filter(s => s.shiftType === 'evening').length,
+      support: relevant.filter(s => s.isSupport).length,
+    };
+  }, [schedules, currentStoreId, days]);
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {toast && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-500 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in text-sm font-medium">
+          <Check size={16} />
+          {toast}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">员工班表</h1>
@@ -232,8 +283,8 @@ export default function Schedule() {
                 </tr>
               </thead>
               <tbody>
-                {employees.map(emp => {
-                  const empSchedules = schedules.filter(s => s.employeeId === emp.id);
+                {storeEmployees.map(emp => {
+                  const empMap = empSchedulesMap[emp.id] || {};
                   return (
                     <tr key={emp.id} className="border-t border-gray-100 hover:bg-gray-50/50">
                       <td className="py-3 px-4 sticky left-0 bg-white z-10">
@@ -251,7 +302,7 @@ export default function Schedule() {
                       </td>
                       {days.map((day, dayIdx) => {
                         const dateStr = format(day, 'yyyy-MM-dd');
-                        const sched = empSchedules.find(s => s.date === dateStr);
+                        const sched = empMap[dateStr];
                         const isCurrentMonth = isSameMonth(day, currentDate);
                         
                         return (
@@ -312,7 +363,7 @@ export default function Schedule() {
             <h3 className="font-semibold text-gray-800">跨店支援</h3>
           </div>
           <p className="text-sm text-gray-500 mb-3">
-            本月共 {Math.floor(Math.random() * 8) + 2} 人次跨店支援
+            本月共 {shiftStats.support} 人次跨店支援
           </p>
           <button className="w-full py-2 text-sm text-cyan-600 bg-cyan-50 rounded-lg hover:bg-cyan-100 transition-colors">
             管理支援排班
@@ -325,7 +376,7 @@ export default function Schedule() {
             <h3 className="font-semibold text-gray-800">临时换班</h3>
           </div>
           <p className="text-sm text-gray-500 mb-3">
-            本月共 {Math.floor(Math.random() * 6) + 1} 次换班申请
+            本月共 {useBusinessStore.getState().swapRequests.filter(s => s.storeId === currentStoreId).length} 次换班申请
           </p>
           <button className="w-full py-2 text-sm text-violet-600 bg-violet-50 rounded-lg hover:bg-violet-100 transition-colors">
             查看换班记录
@@ -340,15 +391,15 @@ export default function Schedule() {
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-gray-500">早班</span>
-              <span className="font-medium text-gray-700">{Math.floor(Math.random() * 20) + 30} 班</span>
+              <span className="font-medium text-gray-700">{shiftStats.morning} 班</span>
             </div>
             <div className="flex justify-between">
               <span className="text-gray-500">中班</span>
-              <span className="font-medium text-gray-700">{Math.floor(Math.random() * 15) + 25} 班</span>
+              <span className="font-medium text-gray-700">{shiftStats.middle} 班</span>
             </div>
             <div className="flex justify-between">
               <span className="text-gray-500">晚班</span>
-              <span className="font-medium text-gray-700">{Math.floor(Math.random() * 15) + 20} 班</span>
+              <span className="font-medium text-gray-700">{shiftStats.evening} 班</span>
             </div>
           </div>
         </div>

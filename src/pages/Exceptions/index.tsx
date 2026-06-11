@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { 
-  AlertTriangle, 
-  Search, 
-  Filter, 
+import {
+  AlertTriangle,
+  Search,
+  Filter,
   Clock,
   CheckCircle,
   XCircle,
@@ -11,27 +11,35 @@ import {
   Calendar,
   MessageSquare,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
 } from 'lucide-react';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
-import { exceptionTickets, exceptionTypeLabels } from '@/data/exceptions';
-import { getEmployeesByStore } from '@/data/employees';
+import { getEmployeesByStore, employees } from '@/data/employees';
 import { format } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
 import { cn, getStatusColor, getStatusLabel, getPriorityColor, getPriorityLabel } from '@/utils';
+import { exceptionTypeLabels } from '@/data/exceptions';
 import type { TicketStatus, ExceptionType } from '@/types';
 
 export default function Exceptions() {
-  const { currentStoreId } = useAppStore();
+  const { currentStoreId, exceptionTickets, resolveTicket, rejectTicket, createExceptionTicket } = useBusinessStore();
   const [activeTab, setActiveTab] = useState<TicketStatus | 'all'>('all');
   const [searchText, setSearchText] = useState('');
   const [typeFilter, setTypeFilter] = useState<ExceptionType | 'all'>('all');
   const [selectedTicket, setSelectedTicket] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    employeeId: '',
+    type: 'other' as ExceptionType,
+    date: format(new Date(), 'yyyy-MM-dd'),
+    description: '',
+    priority: 'medium' as 'high' | 'medium' | 'low',
+  });
 
   const currentStore = stores.find(s => s.id === currentStoreId);
-  const employees = getEmployeesByStore(currentStoreId);
-  
+  const storeEmployees = getEmployeesByStore(currentStoreId);
+
   let tickets = exceptionTickets.filter(t => t.storeId === currentStoreId);
 
   if (activeTab !== 'all') {
@@ -44,36 +52,76 @@ export default function Exceptions() {
 
   if (searchText) {
     tickets = tickets.filter(t => {
-      const emp = employees.find(e => e.id === t.employeeId);
+      const emp = storeEmployees.find(e => e.id === t.employeeId);
       return emp?.name.includes(searchText) || t.description.includes(searchText);
     });
   }
 
+  const storeTickets = exceptionTickets.filter(t => t.storeId === currentStoreId);
+
   const tabs = [
     { key: 'all', label: '全部', count: tickets.length },
-    { key: 'pending', label: '待处理', count: tickets.filter(t => t.status === 'pending').length },
-    { key: 'processing', label: '处理中', count: tickets.filter(t => t.status === 'processing').length },
-    { key: 'resolved', label: '已解决', count: tickets.filter(t => t.status === 'resolved').length },
-    { key: 'rejected', label: '已驳回', count: tickets.filter(t => t.status === 'rejected').length },
+    { key: 'pending', label: '待处理', count: storeTickets.filter(t => t.status === 'pending').length },
+    { key: 'processing', label: '处理中', count: storeTickets.filter(t => t.status === 'processing').length },
+    { key: 'resolved', label: '已解决', count: storeTickets.filter(t => t.status === 'resolved').length },
+    { key: 'rejected', label: '已驳回', count: storeTickets.filter(t => t.status === 'rejected').length },
   ];
 
   const selectedTicketData = tickets.find(t => t.id === selectedTicket);
-  const selectedEmployee = selectedTicketData 
-    ? employees.find(e => e.id === selectedTicketData.employeeId) 
+  const selectedEmployee = selectedTicketData
+    ? storeEmployees.find(e => e.id === selectedTicketData.employeeId)
     : null;
 
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  };
+
   const handleResolve = (ticketId: string) => {
-    alert(`工单 ${ticketId} 已标记为已解决`);
+    resolveTicket(ticketId);
+    showToast('工单已通过');
     setSelectedTicket(null);
   };
 
   const handleReject = (ticketId: string) => {
-    alert(`工单 ${ticketId} 已驳回`);
+    rejectTicket(ticketId);
+    showToast('工单已驳回');
     setSelectedTicket(null);
   };
 
+  const submitCreateTicket = () => {
+    if (!createForm.employeeId || !createForm.description.trim()) {
+      showToast('请填写完整的工单信息');
+      return;
+    }
+    createExceptionTicket({
+      employeeId: createForm.employeeId,
+      storeId: currentStoreId,
+      type: createForm.type,
+      date: createForm.date,
+      description: createForm.description,
+      priority: createForm.priority,
+    });
+    setShowCreateModal(false);
+    setCreateForm({
+      employeeId: '',
+      type: 'other',
+      date: format(new Date(), 'yyyy-MM-dd'),
+      description: '',
+      priority: 'medium',
+    });
+    showToast('异常工单已创建');
+  };
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {toast && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-500 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in text-sm font-medium">
+          <CheckCircle size={16} />
+          {toast}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">异常工单</h1>
@@ -84,7 +132,10 @@ export default function Exceptions() {
             <Filter size={16} />
             高级筛选
           </button>
-          <button className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2">
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow flex items-center gap-2"
+          >
             <AlertTriangle size={16} />
             新建工单
           </button>
@@ -100,7 +151,7 @@ export default function Exceptions() {
             <div>
               <p className="text-sm text-gray-500">待处理</p>
               <p className="text-2xl font-bold text-amber-600">
-                {exceptionTickets.filter(t => t.storeId === currentStoreId && t.status === 'pending').length}
+                {storeTickets.filter(t => t.status === 'pending').length}
               </p>
             </div>
           </div>
@@ -114,7 +165,7 @@ export default function Exceptions() {
             <div>
               <p className="text-sm text-gray-500">处理中</p>
               <p className="text-2xl font-bold text-blue-600">
-                {exceptionTickets.filter(t => t.storeId === currentStoreId && t.status === 'processing').length}
+                {storeTickets.filter(t => t.status === 'processing').length}
               </p>
             </div>
           </div>
@@ -128,7 +179,7 @@ export default function Exceptions() {
             <div>
               <p className="text-sm text-gray-500">已解决</p>
               <p className="text-2xl font-bold text-emerald-600">
-                {exceptionTickets.filter(t => t.storeId === currentStoreId && t.status === 'resolved').length}
+                {storeTickets.filter(t => t.status === 'resolved').length}
               </p>
             </div>
           </div>
@@ -142,7 +193,7 @@ export default function Exceptions() {
             <div>
               <p className="text-sm text-gray-500">高优先级</p>
               <p className="text-2xl font-bold text-red-600">
-                {exceptionTickets.filter(t => t.storeId === currentStoreId && t.priority === 'high').length}
+                {storeTickets.filter(t => t.priority === 'high').length}
               </p>
             </div>
           </div>
@@ -197,7 +248,7 @@ export default function Exceptions() {
 
           <div className="max-h-[600px] overflow-y-auto">
             {tickets.map(ticket => {
-              const emp = employees.find(e => e.id === ticket.employeeId);
+              const emp = storeEmployees.find(e => e.id === ticket.employeeId);
               return (
                 <div
                   key={ticket.id}
@@ -208,8 +259,8 @@ export default function Exceptions() {
                   )}
                 >
                   <div className="flex items-start gap-3">
-                    <img 
-                      src={emp?.avatar} 
+                    <img
+                      src={emp?.avatar}
                       alt={emp?.name}
                       className="w-10 h-10 rounded-full object-cover mt-0.5"
                     />
@@ -265,8 +316,8 @@ export default function Exceptions() {
 
             <div className="p-5 space-y-5 overflow-y-auto max-h-[600px]">
               <div className="flex items-center gap-3">
-                <img 
-                  src={selectedEmployee.avatar} 
+                <img
+                  src={selectedEmployee.avatar}
                   alt={selectedEmployee.name}
                   className="w-12 h-12 rounded-full object-cover"
                 />
@@ -393,11 +444,10 @@ export default function Exceptions() {
         </div>
         <div className="grid grid-cols-6 gap-4">
           {Object.entries(exceptionTypeLabels).map(([key, label]) => {
-            const count = exceptionTickets.filter(
-              t => t.storeId === currentStoreId && t.type === key
-            ).length;
-            const percentage = Math.round((count / exceptionTickets.filter(t => t.storeId === currentStoreId).length) * 100);
-            
+            const count = storeTickets.filter(t => t.type === key).length;
+            const total = storeTickets.length;
+            const percentage = total > 0 ? Math.round((count / total) * 100) : 0;
+
             return (
               <div key={key} className="text-center p-4 bg-gray-50 rounded-xl">
                 <p className="text-2xl font-bold text-gray-800">{count}</p>
@@ -408,6 +458,105 @@ export default function Exceptions() {
           })}
         </div>
       </div>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
+          <div
+            className="bg-white rounded-2xl w-[480px] shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="p-6 border-b border-gray-100">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-gray-800">新建异常工单</h3>
+                <button
+                  onClick={() => setShowCreateModal(false)}
+                  className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg"
+                >
+                  <XCircle size={20} />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">选择员工</label>
+                <select
+                  value={createForm.employeeId}
+                  onChange={e => setCreateForm(f => ({ ...f, employeeId: e.target.value }))}
+                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                >
+                  <option value="">请选择员工</option>
+                  {storeEmployees.map(emp => (
+                    <option key={emp.id} value={emp.id}>{emp.name} - {emp.position}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">异常类型</label>
+                <select
+                  value={createForm.type}
+                  onChange={e => setCreateForm(f => ({ ...f, type: e.target.value as ExceptionType }))}
+                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                >
+                  {Object.entries(exceptionTypeLabels).map(([key, label]) => (
+                    <option key={key} value={key}>{label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">异常日期</label>
+                <input
+                  type="date"
+                  value={createForm.date}
+                  onChange={e => setCreateForm(f => ({ ...f, date: e.target.value }))}
+                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">优先级</label>
+                <select
+                  value={createForm.priority}
+                  onChange={e => setCreateForm(f => ({ ...f, priority: e.target.value as 'high' | 'medium' | 'low' }))}
+                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                >
+                  <option value="high">高</option>
+                  <option value="medium">中</option>
+                  <option value="low">低</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">异常描述</label>
+                <textarea
+                  value={createForm.description}
+                  onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))}
+                  placeholder="请输入异常描述..."
+                  rows={3}
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 resize-none"
+                />
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setShowCreateModal(false)}
+                  className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={submitCreateTicket}
+                  className="flex-1 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow"
+                >
+                  创建工单
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

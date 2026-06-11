@@ -1,41 +1,39 @@
 import { useState } from 'react';
 import { 
   FileText, 
-  Calendar as CalendarIcon, 
-  Clock,
+  Clock as ClockIcon,
   Plus,
   CheckCircle,
-  XCircle,
-  Clock as ClockIcon,
   RefreshCw,
-  User,
   ChevronRight
 } from 'lucide-react';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
-import { leaveRequests, leaveTypeLabels } from '@/data/leaves';
-import { swapRequests } from '@/data/swaps';
+import { leaveTypeLabels } from '@/data/leaves';
 import { getEmployeesByStore, employees } from '@/data/employees';
 import { format } from 'date-fns';
-import { zhCN } from 'date-fns/locale';
 import { cn, getStatusColor, getStatusLabel, getShiftLabel } from '@/utils';
+import type { LeaveType, ShiftType } from '@/types';
 
 type TabType = 'leave' | 'swap' | 'quota';
 
 export default function Leave() {
-  const { currentStoreId, currentRole } = useAppStore();
+  const { currentStoreId, currentRole, leaveRequests, swapRequests, addLeaveRequest, addSwapRequest } = useBusinessStore();
   const [activeTab, setActiveTab] = useState<TabType>('leave');
   const [showLeaveModal, setShowLeaveModal] = useState(false);
   const [showSwapModal, setShowSwapModal] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   const [leaveForm, setLeaveForm] = useState({
-    leaveType: 'annual',
-    startDate: '',
-    endDate: '',
+    leaveType: 'annual' as LeaveType,
+    startDate: format(new Date(), 'yyyy-MM-dd'),
+    endDate: format(new Date(), 'yyyy-MM-dd'),
     reason: '',
   });
   const [swapForm, setSwapForm] = useState({
     targetEmployeeId: '',
-    targetDate: '',
+    targetDate: format(new Date(), 'yyyy-MM-dd'),
+    applicantShift: 'morning' as ShiftType,
+    targetShift: 'morning' as ShiftType,
     reason: '',
   });
 
@@ -44,14 +42,59 @@ export default function Leave() {
   const storeLeaves = leaveRequests.filter(r => r.storeId === currentStoreId);
   const storeSwaps = swapRequests.filter(r => r.storeId === currentStoreId);
 
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  };
+
   const handleSubmitLeave = () => {
-    alert('请假申请已提交');
+    if (!leaveForm.reason.trim()) {
+      showToast('请填写请假原因');
+      return;
+    }
+    const start = new Date(leaveForm.startDate);
+    const end = new Date(leaveForm.endDate);
+    const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+    const firstEmp = storeEmployees[0];
+    if (!firstEmp) return;
+    addLeaveRequest({
+      employeeId: firstEmp.id,
+      storeId: currentStoreId,
+      leaveType: leaveForm.leaveType,
+      startDate: leaveForm.startDate,
+      endDate: leaveForm.endDate,
+      days,
+      reason: leaveForm.reason,
+    });
     setShowLeaveModal(false);
+    setLeaveForm({ leaveType: 'annual', startDate: format(new Date(), 'yyyy-MM-dd'), endDate: format(new Date(), 'yyyy-MM-dd'), reason: '' });
+    showToast('请假申请已提交，等待审批');
   };
 
   const handleSubmitSwap = () => {
-    alert('调班申请已提交');
+    if (!swapForm.targetEmployeeId) {
+      showToast('请选择调换员工');
+      return;
+    }
+    if (!swapForm.reason.trim()) {
+      showToast('请填写调班原因');
+      return;
+    }
+    const firstEmp = storeEmployees[0];
+    if (!firstEmp) return;
+    addSwapRequest({
+      applicantId: firstEmp.id,
+      targetId: swapForm.targetEmployeeId,
+      storeId: currentStoreId,
+      applicantDate: format(new Date(), 'yyyy-MM-dd'),
+      targetDate: swapForm.targetDate,
+      applicantShift: swapForm.applicantShift,
+      targetShift: swapForm.targetShift,
+      reason: swapForm.reason,
+    });
     setShowSwapModal(false);
+    setSwapForm({ targetEmployeeId: '', targetDate: format(new Date(), 'yyyy-MM-dd'), applicantShift: 'morning', targetShift: 'morning', reason: '' });
+    showToast('调班申请已提交，等待审批');
   };
 
   const tabs = [
@@ -61,7 +104,14 @@ export default function Leave() {
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {toast && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-500 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in text-sm font-medium">
+          <CheckCircle size={16} />
+          {toast}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">请假调班</h1>
@@ -135,48 +185,26 @@ export default function Leave() {
                     <tr key={request.id} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          <img 
-                            src={emp?.avatar} 
-                            alt={emp?.name}
-                            className="w-8 h-8 rounded-full object-cover"
-                          />
+                          <img src={emp?.avatar} alt={emp?.name} className="w-8 h-8 rounded-full object-cover" />
                           <div>
                             <p className="text-sm font-medium text-gray-800">{emp?.name}</p>
                             <p className="text-xs text-gray-400">{emp?.position}</p>
                           </div>
                         </div>
                       </td>
+                      <td className="py-3 px-4"><span className="text-sm text-gray-800 font-medium">{leaveTypeLabels[request.leaveType]}</span></td>
+                      <td className="py-3 px-4"><span className="text-sm text-gray-700">{request.startDate}</span></td>
+                      <td className="py-3 px-4"><span className="text-sm text-gray-700">{request.endDate}</span></td>
+                      <td className="py-3 px-4"><span className="text-sm font-medium text-gray-800">{request.days} 天</span></td>
+                      <td className="py-3 px-4"><span className="text-sm text-gray-600 max-w-[150px] truncate block">{request.reason}</span></td>
                       <td className="py-3 px-4">
-                        <span className="text-sm text-gray-800 font-medium">
-                          {leaveTypeLabels[request.leaveType]}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-gray-700">{request.startDate}</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-gray-700">{request.endDate}</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm font-medium text-gray-800">{request.days} 天</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-gray-600 max-w-[150px] truncate block">
-                          {request.reason}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className={cn(
-                          'inline-flex px-2.5 py-1 text-xs font-medium rounded-full',
-                          getStatusColor(request.status)
-                        )}>
+                        <span className={cn('inline-flex px-2.5 py-1 text-xs font-medium rounded-full', getStatusColor(request.status))}>
                           {getStatusLabel(request.status)}
                         </span>
                       </td>
                       <td className="py-3 px-4">
                         <button className="text-sm text-cyan-600 hover:text-cyan-700 flex items-center gap-1">
-                          详情
-                          <ChevronRight size={14} />
+                          详情 <ChevronRight size={14} />
                         </button>
                       </td>
                     </tr>
@@ -184,6 +212,9 @@ export default function Leave() {
                 })}
               </tbody>
             </table>
+            {storeLeaves.length === 0 && (
+              <div className="py-12 text-center text-gray-500">暂无请假记录</div>
+            )}
           </div>
         )}
 
@@ -194,7 +225,6 @@ export default function Leave() {
                 <tr>
                   <th className="text-left text-sm font-medium text-gray-500 py-3 px-4">申请人</th>
                   <th className="text-left text-sm font-medium text-gray-500 py-3 px-4">调换人</th>
-                  <th className="text-left text-sm font-medium text-gray-500 py-3 px-4">申请日期</th>
                   <th className="text-left text-sm font-medium text-gray-500 py-3 px-4">调换日期</th>
                   <th className="text-left text-sm font-medium text-gray-500 py-3 px-4">班次调换</th>
                   <th className="text-left text-sm font-medium text-gray-500 py-3 px-4">原因</th>
@@ -210,56 +240,27 @@ export default function Leave() {
                     <tr key={request.id} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          <img 
-                            src={applicant?.avatar} 
-                            alt={applicant?.name}
-                            className="w-8 h-8 rounded-full object-cover"
-                          />
-                          <div>
-                            <p className="text-sm font-medium text-gray-800">{applicant?.name}</p>
-                          </div>
+                          <img src={applicant?.avatar} alt={applicant?.name} className="w-8 h-8 rounded-full object-cover" />
+                          <span className="text-sm font-medium text-gray-800">{applicant?.name}</span>
                         </div>
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          <img 
-                            src={target?.avatar} 
-                            alt={target?.name}
-                            className="w-8 h-8 rounded-full object-cover"
-                          />
-                          <div>
-                            <p className="text-sm font-medium text-gray-800">{target?.name}</p>
-                          </div>
+                          <img src={target?.avatar} alt={target?.name} className="w-8 h-8 rounded-full object-cover" />
+                          <span className="text-sm font-medium text-gray-800">{target?.name}</span>
                         </div>
                       </td>
+                      <td className="py-3 px-4"><span className="text-sm text-gray-700">{request.targetDate}</span></td>
+                      <td className="py-3 px-4"><span className="text-sm text-gray-600">{getShiftLabel(request.applicantShift)} → {getShiftLabel(request.targetShift)}</span></td>
+                      <td className="py-3 px-4"><span className="text-sm text-gray-600 max-w-[150px] truncate block">{request.reason}</span></td>
                       <td className="py-3 px-4">
-                        <span className="text-sm text-gray-700">{request.applicantDate}</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-gray-700">{request.targetDate}</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-gray-600">
-                          {getShiftLabel(request.applicantShift)} → {getShiftLabel(request.targetShift)}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-sm text-gray-600 max-w-[150px] truncate block">
-                          {request.reason}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className={cn(
-                          'inline-flex px-2.5 py-1 text-xs font-medium rounded-full',
-                          getStatusColor(request.status)
-                        )}>
+                        <span className={cn('inline-flex px-2.5 py-1 text-xs font-medium rounded-full', getStatusColor(request.status))}>
                           {getStatusLabel(request.status)}
                         </span>
                       </td>
                       <td className="py-3 px-4">
                         <button className="text-sm text-cyan-600 hover:text-cyan-700 flex items-center gap-1">
-                          详情
-                          <ChevronRight size={14} />
+                          详情 <ChevronRight size={14} />
                         </button>
                       </td>
                     </tr>
@@ -267,6 +268,9 @@ export default function Leave() {
                 })}
               </tbody>
             </table>
+            {storeSwaps.length === 0 && (
+              <div className="py-12 text-center text-gray-500">暂无调班记录</div>
+            )}
           </div>
         )}
 
@@ -274,30 +278,20 @@ export default function Leave() {
           <div className="p-6">
             <div className="grid grid-cols-3 gap-6 mb-8">
               {[
-                { type: 'annual', label: '年假', total: 10, used: 3, color: 'cyan' },
-                { type: 'sick', label: '病假', total: 5, used: 1, color: 'emerald' },
-                { type: 'compensation', label: '调休', total: 3, used: 0.5, color: 'violet' },
+                { type: 'annual', label: '年假', total: 10, used: storeLeaves.filter(l => l.leaveType === 'annual' && l.status === 'approved').reduce((s, l) => s + l.days, 0), color: 'cyan' },
+                { type: 'sick', label: '病假', total: 5, used: storeLeaves.filter(l => l.leaveType === 'sick' && l.status === 'approved').reduce((s, l) => s + l.days, 0), color: 'emerald' },
+                { type: 'compensation', label: '调休', total: 3, used: storeLeaves.filter(l => l.leaveType === 'compensation' && l.status === 'approved').reduce((s, l) => s + l.days, 0), color: 'violet' },
               ].map(item => {
-                const remaining = item.total - item.used;
-                const percentage = (item.used / item.total) * 100;
+                const remaining = Math.max(0, item.total - item.used);
+                const percentage = item.total > 0 ? Math.min((item.used / item.total) * 100, 100) : 0;
                 return (
                   <div key={item.type} className="bg-gray-50 rounded-xl p-5">
                     <div className="flex items-center justify-between mb-3">
                       <span className="font-medium text-gray-800">{item.label}</span>
-                      <span className="text-2xl font-bold text-gray-800">
-                        {remaining}<span className="text-sm font-normal text-gray-500 ml-1">天</span>
-                      </span>
+                      <span className="text-2xl font-bold text-gray-800">{remaining}<span className="text-sm font-normal text-gray-500 ml-1">天</span></span>
                     </div>
                     <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                      <div 
-                        className={cn(
-                          'h-full rounded-full transition-all',
-                          item.color === 'cyan' && 'bg-cyan-500',
-                          item.color === 'emerald' && 'bg-emerald-500',
-                          item.color === 'violet' && 'bg-violet-500',
-                        )}
-                        style={{ width: `${percentage}%` }}
-                      ></div>
+                      <div className={cn('h-full rounded-full transition-all', item.color === 'cyan' && 'bg-cyan-500', item.color === 'emerald' && 'bg-emerald-500', item.color === 'violet' && 'bg-violet-500')} style={{ width: `${percentage}%` }}></div>
                     </div>
                     <div className="flex justify-between mt-2 text-xs text-gray-500">
                       <span>已用 {item.used} 天</span>
@@ -307,7 +301,6 @@ export default function Leave() {
                 );
               })}
             </div>
-
             <h3 className="font-semibold text-gray-800 mb-4">员工假期额度</h3>
             <div className="overflow-x-auto">
               <table className="w-full">
@@ -317,7 +310,6 @@ export default function Leave() {
                     <th className="text-center text-sm font-medium text-gray-500 py-3 px-4">年假</th>
                     <th className="text-center text-sm font-medium text-gray-500 py-3 px-4">病假</th>
                     <th className="text-center text-sm font-medium text-gray-500 py-3 px-4">调休</th>
-                    <th className="text-center text-sm font-medium text-gray-500 py-3 px-4">状态</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -325,42 +317,13 @@ export default function Leave() {
                     <tr key={emp.id} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          <img 
-                            src={emp.avatar} 
-                            alt={emp.name}
-                            className="w-8 h-8 rounded-full object-cover"
-                          />
-                          <div>
-                            <p className="text-sm font-medium text-gray-800">{emp.name}</p>
-                            <p className="text-xs text-gray-400">{emp.position}</p>
-                          </div>
+                          <img src={emp.avatar} alt={emp.name} className="w-8 h-8 rounded-full object-cover" />
+                          <div><p className="text-sm font-medium text-gray-800">{emp.name}</p><p className="text-xs text-gray-400">{emp.position}</p></div>
                         </div>
                       </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className="text-sm text-gray-700">
-                          {emp.annualLeaveDays - emp.usedAnnualLeave} / {emp.annualLeaveDays} 天
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className="text-sm text-gray-700">
-                          {emp.sickLeaveDays - emp.usedSickLeave} / {emp.sickLeaveDays} 天
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className="text-sm text-gray-700">
-                          {emp.compLeaveDays - emp.usedCompLeave} / {emp.compLeaveDays} 天
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className={cn(
-                          'inline-flex px-2.5 py-1 text-xs font-medium rounded-full',
-                          emp.status === 'active' ? 'bg-emerald-100 text-emerald-700' : 
-                          emp.status === 'blacklist' ? 'bg-red-100 text-red-700' :
-                          'bg-gray-100 text-gray-700'
-                        )}>
-                          {emp.status === 'active' ? '正常' : emp.status === 'blacklist' ? '黑名单' : '离职'}
-                        </span>
-                      </td>
+                      <td className="py-3 px-4 text-center text-sm text-gray-700">{emp.annualLeaveDays - emp.usedAnnualLeave} / {emp.annualLeaveDays} 天</td>
+                      <td className="py-3 px-4 text-center text-sm text-gray-700">{emp.sickLeaveDays - emp.usedSickLeave} / {emp.sickLeaveDays} 天</td>
+                      <td className="py-3 px-4 text-center text-sm text-gray-700">{emp.compLeaveDays - emp.usedCompLeave} / {emp.compLeaveDays} 天</td>
                     </tr>
                   ))}
                 </tbody>
@@ -372,70 +335,33 @@ export default function Leave() {
 
       {showLeaveModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowLeaveModal(false)}>
-          <div 
-            className="bg-white rounded-2xl w-[480px] shadow-2xl"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="p-6 border-b border-gray-100">
-              <h3 className="text-lg font-semibold text-gray-800">提交请假申请</h3>
-            </div>
+          <div className="bg-white rounded-2xl w-[480px] shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b border-gray-100"><h3 className="text-lg font-semibold text-gray-800">提交请假申请</h3></div>
             <div className="p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">请假类型</label>
-                <select 
-                  value={leaveForm.leaveType}
-                  onChange={e => setLeaveForm({ ...leaveForm, leaveType: e.target.value })}
-                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                >
-                  {Object.entries(leaveTypeLabels).map(([key, label]) => (
-                    <option key={key} value={key}>{label}</option>
-                  ))}
+                <select value={leaveForm.leaveType} onChange={e => setLeaveForm({ ...leaveForm, leaveType: e.target.value as LeaveType })} className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500">
+                  {Object.entries(leaveTypeLabels).map(([key, label]) => (<option key={key} value={key}>{label}</option>))}
                 </select>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">开始日期</label>
-                  <input 
-                    type="date"
-                    value={leaveForm.startDate}
-                    onChange={e => setLeaveForm({ ...leaveForm, startDate: e.target.value })}
-                    className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                  />
+                  <input type="date" value={leaveForm.startDate} onChange={e => setLeaveForm({ ...leaveForm, startDate: e.target.value })} className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500" />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">结束日期</label>
-                  <input 
-                    type="date"
-                    value={leaveForm.endDate}
-                    onChange={e => setLeaveForm({ ...leaveForm, endDate: e.target.value })}
-                    className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                  />
+                  <input type="date" value={leaveForm.endDate} onChange={e => setLeaveForm({ ...leaveForm, endDate: e.target.value })} className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500" />
                 </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">请假原因</label>
-                <textarea 
-                  value={leaveForm.reason}
-                  onChange={e => setLeaveForm({ ...leaveForm, reason: e.target.value })}
-                  rows={4}
-                  placeholder="请输入请假原因..."
-                  className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 resize-none"
-                ></textarea>
+                <textarea value={leaveForm.reason} onChange={e => setLeaveForm({ ...leaveForm, reason: e.target.value })} rows={4} placeholder="请输入请假原因..." className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500 resize-none"></textarea>
               </div>
             </div>
             <div className="p-6 border-t border-gray-100 flex gap-3">
-              <button 
-                onClick={() => setShowLeaveModal(false)}
-                className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
-              >
-                取消
-              </button>
-              <button 
-                onClick={handleSubmitLeave}
-                className="flex-1 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow"
-              >
-                提交申请
-              </button>
+              <button onClick={() => setShowLeaveModal(false)} className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors">取消</button>
+              <button onClick={handleSubmitLeave} className="flex-1 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow">提交申请</button>
             </div>
           </div>
         </div>
@@ -443,60 +369,42 @@ export default function Leave() {
 
       {showSwapModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowSwapModal(false)}>
-          <div 
-            className="bg-white rounded-2xl w-[480px] shadow-2xl"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="p-6 border-b border-gray-100">
-              <h3 className="text-lg font-semibold text-gray-800">提交调班申请</h3>
-            </div>
+          <div className="bg-white rounded-2xl w-[480px] shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="p-6 border-b border-gray-100"><h3 className="text-lg font-semibold text-gray-800">提交调班申请</h3></div>
             <div className="p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">调换员工</label>
-                <select 
-                  value={swapForm.targetEmployeeId}
-                  onChange={e => setSwapForm({ ...swapForm, targetEmployeeId: e.target.value })}
-                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                >
+                <select value={swapForm.targetEmployeeId} onChange={e => setSwapForm({ ...swapForm, targetEmployeeId: e.target.value })} className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
                   <option value="">请选择调换员工</option>
-                  {storeEmployees.map(emp => (
-                    <option key={emp.id} value={emp.id}>{emp.name} - {emp.position}</option>
-                  ))}
+                  {storeEmployees.map(emp => (<option key={emp.id} value={emp.id}>{emp.name} - {emp.position}</option>))}
                 </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">调换日期</label>
-                <input 
-                  type="date"
-                  value={swapForm.targetDate}
-                  onChange={e => setSwapForm({ ...swapForm, targetDate: e.target.value })}
-                  className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                />
+                <input type="date" value={swapForm.targetDate} onChange={e => setSwapForm({ ...swapForm, targetDate: e.target.value })} className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">我的班次</label>
+                  <select value={swapForm.applicantShift} onChange={e => setSwapForm({ ...swapForm, applicantShift: e.target.value as ShiftType })} className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                    <option value="morning">早班</option><option value="middle">中班</option><option value="evening">晚班</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">对方班次</label>
+                  <select value={swapForm.targetShift} onChange={e => setSwapForm({ ...swapForm, targetShift: e.target.value as ShiftType })} className="w-full h-10 px-3 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                    <option value="morning">早班</option><option value="middle">中班</option><option value="evening">晚班</option>
+                  </select>
+                </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">调班原因</label>
-                <textarea 
-                  value={swapForm.reason}
-                  onChange={e => setSwapForm({ ...swapForm, reason: e.target.value })}
-                  rows={4}
-                  placeholder="请输入调班原因..."
-                  className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 resize-none"
-                ></textarea>
+                <textarea value={swapForm.reason} onChange={e => setSwapForm({ ...swapForm, reason: e.target.value })} rows={4} placeholder="请输入调班原因..." className="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 resize-none"></textarea>
               </div>
             </div>
             <div className="p-6 border-t border-gray-100 flex gap-3">
-              <button 
-                onClick={() => setShowSwapModal(false)}
-                className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
-              >
-                取消
-              </button>
-              <button 
-                onClick={handleSubmitSwap}
-                className="flex-1 py-2.5 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow"
-              >
-                提交申请
-              </button>
+              <button onClick={() => setShowSwapModal(false)} className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors">取消</button>
+              <button onClick={handleSubmitSwap} className="flex-1 py-2.5 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-lg text-sm font-medium hover:shadow-lg transition-shadow">提交申请</button>
             </div>
           </div>
         </div>

@@ -10,11 +10,9 @@ import {
   MapPin,
   Calendar
 } from 'lucide-react';
-import { useAppStore } from '@/store/appStore';
-import { getTodayCheckinStats } from '@/data/checkins';
-import { exceptionTickets, exceptionTypeLabels } from '@/data/exceptions';
-import { getEmployeesByStore } from '@/data/employees';
-import { schedules } from '@/data/schedules';
+import { useBusinessStore } from '@/store/businessStore';
+import { exceptionTypeLabels } from '@/data/exceptions';
+import { getEmployeesByStore, employees as allEmployees } from '@/data/employees';
 import { stores } from '@/data/stores';
 import { format, startOfWeek, addDays } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -54,10 +52,21 @@ function StatCard({ title, value, icon: Icon, trend, trendValue, gradient, iconB
 }
 
 export default function Dashboard() {
-  const { currentStoreId } = useAppStore();
+  const { currentStoreId, checkinRecords, exceptionTickets, schedules } = useBusinessStore();
   const currentStore = stores.find(s => s.id === currentStoreId);
-  const stats = getTodayCheckinStats(currentStoreId);
-  const employees = getEmployeesByStore(currentStoreId);
+  const storeEmployees = getEmployeesByStore(currentStoreId);
+  
+  const todayStr = format(new Date(), 'yyyy-MM-dd');
+  const todayRecords = checkinRecords.filter(r => r.storeId === currentStoreId && r.date === todayStr);
+  const stats = {
+    total: todayRecords.length,
+    normal: todayRecords.filter(r => r.status === 'normal').length,
+    late: todayRecords.filter(r => r.status === 'late').length,
+    absent: todayRecords.filter(r => r.status === 'absent').length,
+    earlyLeave: todayRecords.filter(r => r.status === 'early_leave').length,
+    pending: todayRecords.filter(r => r.status === 'pending').length,
+    distanceAbnormal: todayRecords.filter(r => r.isDistanceAbnormal).length,
+  };
   const pendingTickets = exceptionTickets.filter(
     t => t.storeId === currentStoreId && (t.status === 'pending' || t.status === 'processing')
   ).slice(0, 5);
@@ -73,7 +82,7 @@ export default function Dashboard() {
     return schedules.filter(
       s => s.storeId === currentStoreId && s.date >= startStr && s.date <= endStr
     );
-  }, [currentStoreId, weekStart]);
+  }, [currentStoreId, weekStart, schedules]);
 
   const attendanceRate = stats.total > 0 
     ? Math.round(((stats.normal + stats.late * 0.5) / stats.total) * 100) 
@@ -148,7 +157,7 @@ export default function Dashboard() {
           </div>
           <div className="space-y-3">
             {pendingTickets.map(ticket => {
-              const emp = employees.find(e => e.id === ticket.employeeId);
+              const emp = allEmployees.find(e => e.id === ticket.employeeId);
               return (
                 <div 
                   key={ticket.id}
@@ -284,7 +293,7 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {employees.slice(0, 6).map(emp => (
+              {storeEmployees.slice(0, 6).map(emp => (
                 <tr key={emp.id} className="border-t border-gray-100">
                   <td className="py-3 pr-4">
                     <div className="flex items-center gap-2">

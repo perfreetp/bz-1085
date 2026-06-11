@@ -10,7 +10,7 @@ import {
   Store
 } from 'lucide-react';
 import { cn } from '@/utils';
-import { useAppStore } from '@/store/appStore';
+import { useBusinessStore } from '@/store/businessStore';
 import { stores } from '@/data/stores';
 
 const navItems = [
@@ -24,7 +24,7 @@ const navItems = [
 ];
 
 export default function Sidebar() {
-  const { currentStoreId, setCurrentStoreId, currentRole } = useAppStore();
+  const { currentStoreId, setCurrentStoreId, currentRole } = useBusinessStore();
   const currentStore = stores.find(s => s.id === currentStoreId);
 
   return (
